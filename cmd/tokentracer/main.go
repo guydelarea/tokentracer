@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -24,6 +25,16 @@ import (
 // which SQLite survives — but the tail of a session is where the interesting
 // requests are, so we wait for it.
 const shutdownGrace = 35 * time.Second
+
+// banner is tokentrace's ANSI Shadow wordmark, extended with the trailing R.
+const banner = `
+████████╗ ██████╗ ██╗  ██╗███████╗███╗   ██╗████████╗██████╗  █████╗  ██████╗███████╗██████╗
+╚══██╔══╝██╔═══██╗██║ ██╔╝██╔════╝████╗  ██║╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔════╝██╔══██╗
+   ██║   ██║   ██║█████╔╝ █████╗  ██╔██╗ ██║   ██║   ██████╔╝███████║██║     █████╗  ██████╔╝
+   ██║   ██║   ██║██╔═██╗ ██╔══╝  ██║╚██╗██║   ██║   ██╔══██╗██╔══██║██║     ██╔══╝  ██╔══██╗
+   ██║   ╚██████╔╝██║  ██╗███████╗██║ ╚████║   ██║   ██║  ██║██║  ██║╚██████╗███████╗██║  ██║
+   ╚═╝    ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝╚═╝  ╚═╝
+`
 
 type config struct {
 	Port     string
@@ -90,6 +101,8 @@ func (a *app) close() {
 }
 
 func main() {
+	fmt.Fprint(os.Stderr, banner)
+
 	cfg := loadConfig()
 
 	a, err := newApp(cfg)
