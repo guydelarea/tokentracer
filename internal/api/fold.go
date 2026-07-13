@@ -40,6 +40,13 @@ type overview struct {
 	Tokens    tokens   `json:"tokens"` // the current window
 	Latency   latency  `json:"latency"`
 	Timeline  []bucket `json:"timeline"`
+
+	// ColdStart says we have been watching for less than one window, which is
+	// exactly when BurnAvg's floor (see below) pins it to BurnNow. The ratio
+	// between them is then 1 by construction, and any trend read off it — most
+	// of all a reassuring one — is an artifact of the arithmetic, not a fact
+	// about the spend. The page must not claim a trend it cannot have.
+	ColdStart bool `json:"coldStart"`
 }
 
 type latency struct {
@@ -63,8 +70,16 @@ type bucket struct {
 }
 
 type recentRow struct {
-	ID      int64     `json:"id"`
-	Time    string    `json:"time"`
+	ID   int64  `json:"id"`
+	Time string `json:"time"`
+
+	// Label is the request's own first words — what was ASKED. Op is what came
+	// back. Without the ask, a log of three identical `end_turn` rows cannot tell
+	// you that one of them was your prompt and the other was Claude Code quietly
+	// paying a model to name the session. The store has carried this since v1; it
+	// simply never reached the wire.
+	Label string `json:"label"`
+
 	Model   string    `json:"model"`
 	Sid     string    `json:"sid"`
 	Op      string    `json:"op"`
@@ -79,6 +94,7 @@ type recentRow struct {
 	Bytes   byteSplit `json:"bytes"`
 	ErrType string    `json:"errType,omitempty"`
 	ErrMsg  string    `json:"errMsg,omitempty"`
+	Probe   bool      `json:"probe,omitempty"`
 }
 
 type tokens struct {
@@ -155,8 +171,10 @@ func fold(lifetime []store.UsageRow, window, recent []store.Row, rates []billing
 		// requests over a few seconds, and dividing by those seconds extrapolates
 		// to a $191/hr "average" that is arithmetically true and completely
 		// useless. The floor decays out of the way within the first ten minutes.
-		hours := max(now.Sub(oldest), windowMin*time.Minute).Hours()
+		watched := now.Sub(oldest)
+		hours := max(watched, windowMin*time.Minute).Hours()
 		v.Overview.BurnAvg = v.Cost / hours
+		v.Overview.ColdStart = watched < windowMin*time.Minute
 	}
 
 	// ---- timeline: 60 one-minute buckets, oldest first ----
@@ -193,7 +211,7 @@ func fold(lifetime []store.UsageRow, window, recent []store.Row, rates []billing
 			b.CostRead += bill.Read
 			b.CostWrite += bill.Write
 			b.CostOut += bill.Out
-			if r.Status >= 400 {
+			if r.Status >= 400 && !benignErr(r) {
 				b.Err++
 			}
 		}
@@ -244,6 +262,7 @@ func fold(lifetime []store.UsageRow, window, recent []store.Row, rates []billing
 		v.Recent = append(v.Recent, recentRow{
 			ID:      r.ID,
 			Time:    at.Format(time.RFC3339),
+			Label:   r.Label,
 			Model:   model,
 			Sid:     r.SessionID,
 			Op:      r.Op,
@@ -263,9 +282,41 @@ func fold(lifetime []store.UsageRow, window, recent []store.Row, rates []billing
 			},
 			ErrType: r.ErrType,
 			ErrMsg:  r.ErrMsg,
+			Probe:   isProbe(r),
 		})
 	}
 	return v
+}
+
+// isProbe reports whether a row is a client asking a question about the account
+// rather than asking the model for anything.
+//
+// Claude Code opens every session with `{"max_tokens":1,"messages":[{"role":
+// "user","content":"quota"}]}`. Anthropic answers a depleted quota with a 429,
+// the client reads that as its answer and carries on, and nothing about the
+// exchange is a failure. Counted as an error it is worse than noise: it puts a
+// red row and a non-zero error rate on the dashboard at the start of every
+// single session, which is precisely how a real error learns to look normal.
+//
+// max_tokens:1 with no tools is the test, because it is the *semantics* of a
+// probe — a caller that wanted an answer would leave room for one. Matching the
+// literal string "quota" would fit this month's client and quietly stop working
+// on the next one. A row from before the max_tokens column existed has 0 here
+// and is never a probe, which is the safe way to be wrong: it shows an error
+// that isn't one, rather than hiding one that is.
+func isProbe(r store.Row) bool {
+	return r.MaxTokens == 1 && r.ToolCount == 0
+}
+
+// benignErr reports a 4xx that is not a failure: the 429 the API answers a quota
+// probe with, which is the probe working exactly as intended.
+//
+// The narrowness is the point. Being a probe does not make a request's errors
+// uninteresting — a 401 there means the key is dead and a 500 means the upstream
+// is down, and those are the first things you would want a startup ping to tell
+// you. Only the 429 is an answer rather than a fault, so only the 429 is forgiven.
+func benignErr(r store.Row) bool {
+	return isProbe(r) && r.Status == 429
 }
 
 // billedModel is the model the money is actually charged against: the one that

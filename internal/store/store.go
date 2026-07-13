@@ -68,6 +68,11 @@ type Row struct {
 	Turns     int64
 	ToolCount int64
 
+	// MaxTokens is the request's own output cap. 0 means we never learned it.
+	// It is what tells a real request apart from a client's probe: nothing that
+	// wants an answer asks for one token.
+	MaxTokens int64
+
 	TotalBytes    int64
 	ToolsBytes    int64
 	SystemBytes   int64
@@ -142,6 +147,12 @@ CREATE TABLE captures (
   response_gz BLOB                            -- assembled response message JSON, gzipped
 );
 `,
+	// 2 — max_tokens. A client's probe and a request that genuinely failed are
+	// both a 4xx with no usage; this is the column that separates them. Claude
+	// Code opens every session with a max_tokens:1 "quota" ping the API answers
+	// with a 429 by design, and without this we count it as an error forever.
+	// NULL on every pre-existing row: we cannot know, and will not guess.
+	`ALTER TABLE requests ADD COLUMN max_tokens INTEGER;`,
 }
 
 // Open opens (creating if needed) the database at path, applies the pragmas
@@ -248,9 +259,9 @@ INSERT INTO requests (
 	ts_ms, endpoint, session_id, model_req, model_served, status, streamed, aborted,
 	duration_ms, ttft_ms, stop_reason, op, label,
 	input_tokens, output_tokens, cache_read_tokens, cache_w5m_tokens, cache_w1h_tokens,
-	turns, tool_count, total_bytes, tools_bytes, system_bytes, messages_bytes,
+	turns, tool_count, max_tokens, total_bytes, tools_bytes, system_bytes, messages_bytes,
 	err_type, err_msg
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // InsertExchange writes the fact row and, when there is a body worth keeping,
 // the capture — in one transaction. There is never a capture without facts.
@@ -274,7 +285,7 @@ func (s *Store) InsertExchange(r Row, reqBody, respBody []byte) (int64, error) {
 		r.Status, r.Streamed, r.Aborted,
 		r.DurationMs, r.TtftMs, nullStr(r.StopReason), nullStr(r.Op), nullStr(r.Label),
 		r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheW5mTokens, r.CacheW1hTokens,
-		r.Turns, r.ToolCount, r.TotalBytes, r.ToolsBytes, r.SystemBytes, r.MessagesBytes,
+		r.Turns, r.ToolCount, nullInt(r.MaxTokens), r.TotalBytes, r.ToolsBytes, r.SystemBytes, r.MessagesBytes,
 		nullStr(r.ErrType), nullStr(r.ErrMsg),
 	)
 	if err != nil {
@@ -372,4 +383,14 @@ func nullStr(s string) any {
 		return nil
 	}
 	return s
+}
+
+// nullInt stores an unknown count as NULL rather than 0. A request that asks for
+// zero output tokens does not exist, so 0 can only mean "we never parsed it" —
+// and that is a different fact from any real cap.
+func nullInt(n int64) any {
+	if n == 0 {
+		return nil
+	}
+	return n
 }

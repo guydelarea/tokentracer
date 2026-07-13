@@ -22,7 +22,7 @@ const rowColumns = `
 	id, ts_ms, endpoint, session_id, model_req, model_served, status, streamed, aborted,
 	duration_ms, ttft_ms, stop_reason, op, label,
 	input_tokens, output_tokens, cache_read_tokens, cache_w5m_tokens, cache_w1h_tokens,
-	turns, tool_count, total_bytes, tools_bytes, system_bytes, messages_bytes,
+	turns, tool_count, coalesce(max_tokens, 0), total_bytes, tools_bytes, system_bytes, messages_bytes,
 	err_type, err_msg`
 
 // Lifetime returns every row ever recorded, in the slim pricing projection,
@@ -104,7 +104,7 @@ func scanRow(rows *sql.Rows) (Row, error) {
 		&r.Status, &r.Streamed, &r.Aborted,
 		&r.DurationMs, &r.TtftMs, &stopReason, &op, &label,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheW5mTokens, &r.CacheW1hTokens,
-		&r.Turns, &r.ToolCount, &r.TotalBytes, &r.ToolsBytes, &r.SystemBytes, &r.MessagesBytes,
+		&r.Turns, &r.ToolCount, &r.MaxTokens, &r.TotalBytes, &r.ToolsBytes, &r.SystemBytes, &r.MessagesBytes,
 		&errType, &errMsg,
 	)
 	if err != nil {

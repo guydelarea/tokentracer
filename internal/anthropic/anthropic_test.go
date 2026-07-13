@@ -52,6 +52,7 @@ func TestParseRequestFixture(t *testing.T) {
 		Stream:    true,
 		Turns:     7,
 		ToolCount: 119,
+		MaxTokens: 64000, // a real request leaves room for an answer; a probe asks for 1
 
 		TotalBytes:    308535,
 		ToolsBytes:    232586,

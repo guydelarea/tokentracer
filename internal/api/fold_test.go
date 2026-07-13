@@ -524,3 +524,79 @@ func TestStatsViewJSONContract(t *testing.T) {
 		}
 	}
 }
+
+// The quota probe Claude Code opens every session with. A 429 is the API's
+// ANSWER to it, not a failure of it — so it must not land in the error count,
+// or every session starts with a red row and the error rate is never zero.
+func probeRow(id int64, minsAgo int) store.Row {
+	return store.Row{
+		ID:        id,
+		TsMs:      now.Add(-time.Duration(minsAgo) * time.Minute).UnixMilli(),
+		Endpoint:  "POST /v1/messages",
+		ModelReq:  "test-model",
+		Status:    429,
+		MaxTokens: 1, // the tell: nothing that wants an answer asks for one token
+		ToolCount: 0,
+		Turns:     1,
+		ErrType:   "rate_limit_error",
+	}
+}
+
+func TestFoldQuotaProbeIsNotAnError(t *testing.T) {
+	probe := probeRow(1, 2)
+	real429 := row(2, 2, "test-model", 0, 0, 0, 0, 0)
+	real429.Status = 429
+	real429.ErrType = "rate_limit_error"
+	real429.MaxTokens = 32_000 // a genuine request that genuinely failed
+	real429.ToolCount = 40
+
+	// Being a probe forgives the 429 and NOTHING else. A probe that 401s means the
+	// key is dead — the single most useful thing a startup ping can tell you — and
+	// swallowing it would turn a safety feature into a blindfold.
+	deadKey := probeRow(3, 2)
+	deadKey.Status = 401
+	deadKey.ErrType = "authentication_error"
+
+	rows := []store.Row{probe, real429, deadKey}
+	v := fold(nil, rows, rows, testRates, now, testCfg)
+
+	var errs int
+	for _, b := range v.Overview.Timeline {
+		errs += b.Err
+	}
+	if errs != 2 {
+		t.Errorf("timeline errors = %d, want 2 (the real 429 and the probe's 401, never the probe's 429)", errs)
+	}
+
+	if !v.Recent[0].Probe {
+		t.Error("the max_tokens:1 row should be flagged Probe so the page can draw it grey")
+	}
+	if v.Recent[1].Probe {
+		t.Error("a real 429 from a real request must never be written off as a probe")
+	}
+	if !benignErr(probe) {
+		t.Error("a probe's 429 is the answer to it, not a failure of it")
+	}
+	if benignErr(deadKey) {
+		t.Error("a probe's 401 is a dead key and must stay loud")
+	}
+}
+
+// BurnAvg is floored at one window on a fresh database, which pins it to BurnNow
+// and makes their ratio exactly 1. Every trend the page could read off that ratio
+// is then an artifact — most dangerously the reassuring one. ColdStart is what
+// stops it claiming "steady" over a first-turn cache write that will never recur.
+func TestFoldColdStartRefusesToClaimATrend(t *testing.T) {
+	fresh := []store.UsageRow{usage(2, "test-model", 1_000_000, 0, 0, 0, 0)}
+	v := fold(fresh, nil, nil, testRates, now, testCfg)
+	if !v.Overview.ColdStart {
+		t.Error("ColdStart should be true when the oldest row is younger than the window")
+	}
+	close(t, "burnNow≡burnAvg on a cold start", v.Overview.BurnAvg, v.Cost/(windowMin/60.0))
+
+	// An hour of history is no longer a cold start, and the ratio means something.
+	old := []store.UsageRow{usage(90, "test-model", 1_000_000, 0, 0, 0, 0)}
+	if v := fold(old, nil, nil, testRates, now, testCfg); v.Overview.ColdStart {
+		t.Error("ColdStart should be false once we have more than a window of history")
+	}
+}

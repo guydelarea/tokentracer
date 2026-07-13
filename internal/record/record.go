@@ -170,6 +170,7 @@ func buildRequest(row *store.Row, ex Exchange, best *int) {
 	row.Label = facts.Label
 	row.Turns = int64(facts.Turns)
 	row.ToolCount = int64(facts.ToolCount)
+	row.MaxTokens = int64(facts.MaxTokens)
 	row.ToolsBytes = int64(facts.ToolsBytes)
 	row.SystemBytes = int64(facts.SystemBytes)
 	row.MessagesBytes = int64(facts.MessagesBytes)

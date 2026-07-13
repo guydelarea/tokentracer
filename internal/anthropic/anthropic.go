@@ -34,6 +34,7 @@ type RequestFacts struct {
 	Stream    bool
 	Turns     int
 	ToolCount int
+	MaxTokens int // the request's own output cap; 0 when it named none
 
 	TotalBytes    int // the whole body
 	ToolsBytes    int // Σ per-tool raw bytes
@@ -46,12 +47,13 @@ type RequestFacts struct {
 // request is the shape we read. Sections stay raw: we measure and itemize them,
 // we never rebuild them.
 type request struct {
-	Model    string            `json:"model"`
-	Stream   bool              `json:"stream"`
-	System   json.RawMessage   `json:"system"`
-	Tools    []json.RawMessage `json:"tools"`
-	Messages []json.RawMessage `json:"messages"`
-	Metadata struct {
+	Model     string            `json:"model"`
+	Stream    bool              `json:"stream"`
+	MaxTokens int               `json:"max_tokens"`
+	System    json.RawMessage   `json:"system"`
+	Tools     []json.RawMessage `json:"tools"`
+	Messages  []json.RawMessage `json:"messages"`
+	Metadata  struct {
 		UserID string `json:"user_id"`
 	} `json:"metadata"`
 
@@ -95,6 +97,7 @@ func ParseRequest(body []byte) (RequestFacts, error) {
 	f := RequestFacts{
 		Model:      req.Model,
 		Stream:     req.Stream,
+		MaxTokens:  req.MaxTokens,
 		Turns:      len(req.Messages),
 		ToolCount:  len(req.Tools),
 		TotalBytes: len(body),

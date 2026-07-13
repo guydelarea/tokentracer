@@ -1,3 +1,4 @@
+// @ts-check
 /* TokenTracer dashboard. Vanilla JS, no build step, no external requests.
  *
  * Two rules carried over from tokentrace, both load-bearing:
@@ -7,40 +8,253 @@
  *  2. Numbers are folded server-side in Go; this file only words and draws them.
  *     No cost, burn rate, percentile or aggregate is computed here. The one
  *     exception is presentation: bar widths and the percentages beside them.
+ *
+ * The types below are checked, not compiled: `tsc -p web` reads them and emits
+ * nothing. This file ships to the browser exactly as written, because that is the
+ * file go:embed bakes into the binary. There is no build step and must not be one.
+ */
+
+/* ---------- the wire contract ----------
+ * The Go json tags ARE the contract. The server hands this page JSON and there is
+ * no translation layer between the two, so a field renamed on one side and not the
+ * other has to break somewhere — and this is where, at `tsc`, instead of silently
+ * on the dashboard as a zero.
+ *
+ *   statsView & below  → internal/api/fold.go            (GET /api/stats)
+ *   captureView        → internal/api/api.go             (GET /api/capture)
+ *   Breakdown & below  → internal/anthropic/anthropic.go
+ *
+ * A field is required here when Go sends it unconditionally — which is all of
+ * them but three: errType, errMsg and probe are `omitempty` in Go and optional
+ * here.
+ */
+
+/**
+ * @typedef {object} tokens
+ * @property {number} in    fresh input
+ * @property {number} read  cache reads
+ * @property {number} write cache writes, 5m and 1h summed server-side
+ * @property {number} out
+ */
+
+/**
+ * @typedef {object} costs
+ * @property {number} in
+ * @property {number} read
+ * @property {number} write
+ * @property {number} out
+ */
+
+/**
+ * @typedef {object} byteSplit
+ * @property {number} total
+ * @property {number} tools
+ * @property {number} system
+ * @property {number} messages
+ */
+
+/**
+ * @typedef {object} latency
+ * @property {number} p50Ttft
+ * @property {number} p95Ttft
+ */
+
+/**
+ * One minute of the spend timeline: tokens by class, cost by class.
+ * @typedef {object} bucket
+ * @property {number} t          unix ms at the start of the minute
+ * @property {number} n
+ * @property {number} input
+ * @property {number} cacheRead
+ * @property {number} cacheWrite
+ * @property {number} output
+ * @property {number} costIn
+ * @property {number} costRead
+ * @property {number} costWrite
+ * @property {number} costOut
+ * @property {number} err
+ */
+
+/**
+ * @typedef {object} recentRow
+ * @property {number} id
+ * @property {string} time      RFC3339
+ * @property {string} label     what was ASKED: the first user text, ≤64 chars. Always sent, often ''
+ * @property {string} model     the model the money was billed against, not always the one asked for
+ * @property {string} sid
+ * @property {string} op
+ * @property {number} status
+ * @property {number} ms
+ * @property {number} ttft
+ * @property {string} stop
+ * @property {boolean} aborted
+ * @property {tokens} tok
+ * @property {costs} cost
+ * @property {boolean} priced
+ * @property {byteSplit} bytes
+ * @property {string} [errType] omitempty
+ * @property {string} [errMsg]  omitempty
+ * @property {boolean} [probe]  omitempty
+ */
+
+/**
+ * @typedef {object} overview
+ * @property {number} burnNow   $/hr, extrapolated from the current window
+ * @property {number} burnAvg   $/hr, lifetime
+ * @property {number} reqHr
+ * @property {number} winReqs
+ * @property {number} avgReq
+ * @property {number} hitNow
+ * @property {number} hitAvg
+ * @property {number} peakMin
+ * @property {number} windowMin
+ * @property {tokens} tokens    the current window
+ * @property {latency} latency
+ * @property {bucket[]} timeline
+ * @property {boolean} coldStart under one window of history: no trend can be read off it
+ */
+
+/**
+ * @typedef {object} statsView
+ * @property {number} port
+ * @property {string} upstream
+ * @property {number} traced
+ * @property {number} cost
+ * @property {number} unpricedReqs
+ * @property {tokens} tokens    lifetime
+ * @property {overview} overview
+ * @property {recentRow[]} recent
+ */
+
+/** D is a statsView once the first poll lands — and until it does, the placeholder
+ * below, which has no tokens at all, an empty overview and a port that is still ''.
+ * The first frame is drawn from that, which is why everything downstream reaches
+ * for `|| 0` before it prints a number. These two typedefs say exactly that: the
+ * contract's fields, its names and its types, all optional. Both are derived from
+ * statsView rather than restating it, so neither can drift away from it.
+ * @typedef {Partial<Omit<overview, 'latency'|'tokens'>> & {latency?: Partial<latency>, tokens?: Partial<tokens>}} overviewModel
+ */
+/** @typedef {Omit<statsView, 'port'|'tokens'|'overview'> & {port: number|string, tokens?: Partial<tokens>, overview: overviewModel}} statsModel */
+
+/**
+ * @typedef {object} ToolItem
+ * @property {string} name
+ * @property {number} bytes
+ */
+
+/**
+ * @typedef {object} SystemItem
+ * @property {number} bytes
+ * @property {string} cacheControl "ephemeral/1h", "ephemeral", or ""
+ */
+
+/**
+ * @typedef {object} MessageItem
+ * @property {string} role
+ * @property {number} bytes
+ * @property {string[]} blockKinds
+ */
+
+/**
+ * @typedef {object} Flags
+ * @property {boolean} thinking
+ * @property {boolean} contextManagement
+ * @property {boolean} outputConfig
+ */
+
+/**
+ * @typedef {object} Breakdown
+ * @property {ToolItem[]} tools
+ * @property {SystemItem[]} system
+ * @property {MessageItem[]} messages
+ * @property {Flags} flags
+ */
+
+/**
+ * The /api/capture contract, plus the one field the server never sends: `missing`
+ * is MISSING, the sentinel this page substitutes when the fetch 404s.
+ *
+ * request and response are `any` deliberately. They are the captured blobs — the
+ * request is whatever the client sent, and a blob that did not parse as JSON comes
+ * back quoted, as a bare string. Neither has a shape this page may assume.
+ * @typedef {object} captureView
+ * @property {any} [request]
+ * @property {any} [response]
+ * @property {Breakdown} [breakdown] absent when the body would not parse
+ * @property {boolean} [missing]     client-side only
+ */
+
+/** What a row's op string says the reply did.
+ * @typedef {object} opInfo
+ * @property {string} tag
+ * @property {string} tagC
+ * @property {string} name
+ * @property {string} args
  */
 
 var MRD = '#2fbf87', MIN = '#5aa2f7', MWR = '#d9a04e', MOU = '#ededed', MER = '#ff5a5a';
 var CTOOL = '#c9c9c9', CSYS = '#7a7a7a', CHIST = '#454545';
 
+/** @type {statsModel} */
 var D = {
   port: '', upstream: '', traced: 0, cost: 0, unpricedReqs: 0,
   overview: { timeline: [], latency: {} }, recent: []
 };
+/** @type {{id: number|null, tab: string, toolsAll: boolean}} */
 var S = { id: null, tab: 'request', toolsAll: false };
-var PV = {}, PVT = {};
+var PV = /** @type {Record<string, number|undefined>} */ ({}), PVT = /** @type {Record<string, number|undefined>} */ ({});
+/** @type {captureView|null} */
 var CAP = null;                // the open inspector's fetched capture, cached across tab switches
+/** @type {captureView} */
 var MISSING = { missing: true }; // /api/capture said 404 — the capture row was deleted
 
-function $(s) { return document.querySelector(s); }
+/* Every id passed to $ is one this file or index.html writes, so querySelector
+   cannot miss — with one exception, #toolsall, which exists only once the tools
+   table overflows, and whose single caller checks for it. Typing that miss away
+   here is what keeps the other nine call sites from having to. */
+/** @param {string} s @returns {HTMLElement} */
+function $(s) { return /** @type {HTMLElement} */ (document.querySelector(s)); }
+/** @param {*} s @returns {string} */
 function esc(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
+/** @param {number|undefined} n @returns {string} */
 function fT(n) { n = n || 0; if (n < 1000) return String(n); if (n < 1e6) return (n / 1e3).toFixed(1) + 'k'; return (n / 1e6).toFixed(2) + 'M'; }
+/** @param {number|undefined} b @returns {string} */
 function fK(b) { b = b || 0; if (b < 1024) return b + ' B'; return (b / 1024).toFixed(1) + ' KB'; }
+/** @param {number|undefined} n @returns {string} */
 function fC(n) { return String(Math.round(n || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+/** @param {number|undefined} v @param {number} d @returns {string} */
 function fM(v, d) { return '$' + (v || 0).toFixed(d); }
+/** @param {number} n @returns {string} */
 function p2(n) { return (n < 10 ? '0' : '') + n; }
+/** @param {number} t @returns {string} */
 function clock(t) { var d = new Date(t); return p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds()); }
+/** @param {number} t @returns {string} */
 function clockHM(t) { var d = new Date(t); return p2(d.getHours()) + ':' + p2(d.getMinutes()); }
+/** @param {string} s @param {number} n @returns {string} */
 function trunc(s, n) { s = String(s || ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+/** @param {string} m @returns {string} */
 function shortModel(m) { return String(m || '').replace('claude-', '').replace(/-\d{8}$/, ''); }
+/** @param {number} v @param {number} t @returns {string} */
 function pctOf(v, t) { return t > 0 ? ((v / t) * 100).toFixed(1) + '%' : '0%'; }
+/** @param {recentRow} r @returns {number} */
 function tms(r) { return new Date(r.time).getTime(); }
+/** @param {recentRow} r @returns {boolean} */
 function ok(r) { return r.status < 400; }
+
+/* A 4xx that is not a failure: the 429 the API answers a quota probe with. Claude
+   Code opens every session with a max_tokens:1 "quota" ping, reads the 429 as its
+   answer and carries on. Drawn red it would put an error on the board at the start
+   of every session — which is how a real error learns to look normal. Only the 429
+   is forgiven: a probe that 401s means the key is dead, and that stays red. */
+/** @param {recentRow} r @returns {boolean} */
+function benign(r) { return !!r.probe && r.status === 429; }
 
 /* Fade a number in when it moves by more than 10% — the eye catches the change
    without the page ever animating a still figure. */
+/** @param {string} k @param {number} num @returns {string} */
 function anim(k, num) {
   var now = Date.now(), prev = PV[k];
   if (prev === undefined || Math.abs(num - prev) / Math.max(Math.abs(prev), 1e-9) > 0.1) PVT[k] = now;
@@ -48,7 +262,9 @@ function anim(k, num) {
   return (now - (PVT[k] || 0) < 750) ? 'ttNum 0.5s ease-out' : 'none';
 }
 
+/** @param {string} c @returns {string} */
 function swatch(c) { return '<span class="sw" style="background:' + c + '"></span>'; }
+/** @param {number} rd @param {number} inp @param {number} wr @param {number} out @returns {string} */
 function mix(rd, inp, wr, out) {
   var t = rd + inp + wr + out;
   return '<span class="mixbar">' +
@@ -57,29 +273,42 @@ function mix(rd, inp, wr, out) {
     '<span style="width:' + pctOf(wr, t) + ';background:' + MWR + '"></span>' +
     '<span style="width:' + pctOf(out, t) + ';background:' + MOU + '"></span></span>';
 }
+/** @param {[string, string][]} pairs colour, label @returns {string} */
 function legend(pairs) {
   var h = '<div class="leg">', i;
   for (i = 0; i < pairs.length; i++) h += '<div>' + swatch(pairs[i][0]) + '<span class="t">' + esc(pairs[i][1]) + '</span></div>';
   return h + '</div>';
 }
+/** @type {[string, string][]} */
 var SPEND_LEGEND = [[MRD, 'cache read'], [MIN, 'fresh input'], [MWR, 'cache write'], [MOU, 'output']];
+/** @type {[string, string][]} */
 var COMP_LEGEND = [[CTOOL, 'tool schemas'], [CSYS, 'system'], [CHIST, 'history']];
 
 /* ---------- row accessors ----------
    The /api/stats contract groups a row's tokens and costs into quartets. Nothing
    below invents a number; rowCost sums the row's own four cost components purely
-   so the row can print one figure. */
+   so the row can print one figure.
+
+   The quartets come back Partial: the server always sends all four, but the page
+   reads them through `|| 0` and the types keep that honest. */
+/** @param {number|null} id @returns {recentRow|null} */
 function rowOf(id) { for (var i = 0; i < D.recent.length; i++) if (D.recent[i].id === id) return D.recent[i]; return null; }
+/** @param {recentRow} q @returns {Partial<tokens>} */
 function tokOf(q) { return q.tok || {}; }
+/** @param {recentRow} q @returns {Partial<costs>} */
 function costOf(q) { return q.cost || {}; }
+/** @param {recentRow} q @returns {number} */
 function rowCost(q) { var c = costOf(q); return (c.in || 0) + (c.read || 0) + (c.write || 0) + (c.out || 0); }
+/** @param {recentRow} q @returns {boolean} */
 function unpriced(q) { return q.priced === false; }
 /* Byte splits ride on the row when the server ships them; the breakdown tab
    degrades to a bare note when they are absent. */
+/** @param {recentRow} q @returns {byteSplit|null} */
 function bytesOf(q) { return q.bytes || null; }
 
 /* ---------- tooltip ---------- */
-var TIP = null, TIPDATA = {};
+var TIP = /** @type {HTMLElement} */ (/** @type {any} */ (null)), TIPDATA = /** @type {{buckets?: bucket[]}} */ ({});
+/** @param {string} title @param {string[][]} rows colour, name, value @param {string} foot @returns {string} */
 function tipHtml(title, rows, foot) {
   var h = '<div class="t">' + esc(title) + '</div>', i;
   for (i = 0; i < rows.length; i++) {
@@ -88,11 +317,12 @@ function tipHtml(title, rows, foot) {
   if (foot) h += '<div class="f">' + esc(foot) + '</div>';
   return h;
 }
+/** @param {MouseEvent} ev @param {string} html */
 function showTip(ev, html) {
   var el = TIP;
   el.innerHTML = html;
   el.style.display = 'block';
-  var r = ev.currentTarget.getBoundingClientRect(), w = el.offsetWidth, h = el.offsetHeight;
+  var r = /** @type {HTMLElement} */ (ev.currentTarget).getBoundingClientRect(), w = el.offsetWidth, h = el.offsetHeight;
   var x = r.left + r.width / 2 - w / 2;
   if (x < 8) x = 8;
   if (x + w > window.innerWidth - 8) x = window.innerWidth - 8 - w;
@@ -106,7 +336,15 @@ function hideTip() { TIP.style.display = 'none'; }
 /* What the reply did, parsed into tag/name/args for the log row and the
    inspector title. op is "tool_use · DesignSync" or "text — completion".
    Errors speak through their status instead. */
+/** @param {recentRow} q @returns {opInfo} */
 function opParts(q) {
+  if (q.probe) {
+    if (benign(q)) return { tag: 'probe', tagC: '#7f7f7f', name: '', args: 'quota check · 429 is the answer, not a failure' };
+    if (ok(q)) return { tag: 'probe', tagC: '#7f7f7f', name: '', args: 'quota check' };
+    // A probe that failed any other way is a real problem, and a loud one: a 401
+    // here means the key is dead. Being a probe forgives the 429 and nothing else.
+    return { tag: 'probe', tagC: MER, name: String(q.status), args: 'quota check failed · ' + (q.errType || q.errMsg || '') };
+  }
   if (!ok(q)) return { tag: 'error', tagC: MER, name: String(q.status), args: q.errType || q.errMsg || '' };
   var op = q.op || 'text — completion';
   var em = op.indexOf(' — '), head = em >= 0 ? op.slice(0, em) : op, args = em >= 0 ? op.slice(em + 3) : '';
@@ -116,14 +354,25 @@ function opParts(q) {
 }
 
 /* ---------- overview ---------- */
+/** @returns {string} */
 function renderHome() {
   var ov = D.overview || {}, i;
   var win = ov.windowMin || 10; // the server owns the window; 10 min is tokentrace's default
   var winCap = 'last ' + win + ' min';
 
+  /* Burn is a RATE — dollars per hour, extrapolated from the window — and it is
+     the biggest number on the page, so it is the one most likely to be misread as
+     a bill. The subtitle carries the actual total for exactly that reason.
+
+     Below one window of history the server floors burnAvg at the window, which
+     pins it to burnNow and forces the ratio to 1. Every trend branch here would
+     then land on "steady" — the calmest thing the page can say, said precisely
+     when it knows least, and said over a first-turn cache write that will never
+     recur. So a cold start does not get a trend. It gets told it is a cold start. */
   var burnNow = ov.burnNow || 0, burnAvg = ov.burnAvg || 0;
   var ratio = burnAvg > 0 ? burnNow / burnAvg : 1, burnSub;
   if (!D.traced) burnSub = 'no requests recorded yet';
+  else if (ov.coldStart) burnSub = 'cold start · ' + fM(D.cost, 2) + ' total so far · too little history for a trend';
   else if (ratio > 1.35) burnSub = '▲ ' + ratio.toFixed(1) + '× the average of ' + fM(burnAvg, 2) + '/hr · ' + fM(D.cost, 2) + ' total';
   else if (ratio < 0.7) burnSub = '▾ below the ' + fM(burnAvg, 2) + '/hr average · ' + fM(D.cost, 2) + ' total';
   else burnSub = 'steady · avg ' + fM(burnAvg, 2) + '/hr · ' + fM(D.cost, 2) + ' total';
@@ -139,15 +388,22 @@ function renderHome() {
   var lat = ov.latency || {}, p50 = lat.p50Ttft || 0, p95 = lat.p95Ttft || 0;
   var latSub = p50 > 0 ? 'p95 ' + fC(p95) + ' ms · time to first token' : 'no timed responses yet';
 
-  /* Tokens: the raw facts, before anybody prices them. "In" is every token the
-     model read — fresh input, cache reads and cache writes — because that is the
-     number that answers "what did I send it". */
+  /* Tokens: the raw facts, before anybody prices them.
+
+     Summing fresh input, cache reads and cache writes into one "in" is true and
+     useless. They are the same token to the model and wildly different money to
+     you — a cache read bills at 0.1× and a 1h write at 2×, a 20× spread — so the
+     single number hides the only thing worth knowing about it. A Claude Code turn
+     that reads 100k cached tokens and writes 4k fresh ones looks, collapsed, like
+     a 104k monster; split, it is a cheap turn and an expensive one and you can
+     tell which is which. So: NEW (what you paid full freight or more for) beside
+     CACHED (what you got at a tenth), never added together. */
   var wt = ov.tokens || {}, lt = D.tokens || {};
-  var winIn = (wt.in || 0) + (wt.read || 0) + (wt.write || 0), winOut = wt.out || 0;
-  var lifeIn = (lt.in || 0) + (lt.read || 0) + (lt.write || 0), lifeOut = lt.out || 0;
+  var winNew = (wt.in || 0) + (wt.write || 0), winCached = wt.read || 0, winOut = wt.out || 0;
+  var lifeNew = (lt.in || 0) + (lt.write || 0), lifeCached = lt.read || 0, lifeOut = lt.out || 0;
   var tokSub = D.traced
-    ? 'lifetime ' + fT(lifeIn) + ' in · ' + fT(lifeOut) + ' out'
-    : 'input counts cache reads and writes';
+    ? 'lifetime ' + fT(lifeNew) + ' new · ' + fT(lifeCached) + ' cached · ' + fT(lifeOut) + ' out'
+    : 'new = fresh input + cache writes · cached reads bill at 0.1×';
 
   var h = '<div class="wrap" style="padding-top:36px"><div class="tiles">';
   h += '<div><div class="cap">Burn rate · ' + esc(winCap) + '</div>' +
@@ -161,9 +417,12 @@ function renderHome() {
     '<div class="val" style="gap:8px"><span class="mid" style="animation:' + anim('req', reqHr) + '">' + fC(reqHr) + '</span>' +
     '<span class="unit">/hr</span></div><div class="tile-sub">' + esc(reqSub) + '</div></div>';
   h += '<div style="padding-top:5px"><div class="cap">Tokens · ' + esc(winCap) + '</div>' +
-    '<div class="val" style="gap:6px">' +
-      '<span class="mid" style="animation:' + anim('tin', winIn) + '">' + fT(winIn) + '</span>' +
-      '<span class="unit">in</span>' +
+    '<div class="val trio">' +
+      '<span class="mid" style="animation:' + anim('tnew', winNew) + '">' + fT(winNew) + '</span>' +
+      '<span class="unit">new</span>' +
+      '<span class="unit" style="opacity:0.45;padding:0 1px">·</span>' +
+      '<span class="mid" style="animation:' + anim('tcache', winCached) + '">' + fT(winCached) + '</span>' +
+      '<span class="unit">cached</span>' +
       '<span class="unit" style="opacity:0.45;padding:0 1px">→</span>' +
       '<span class="mid" style="animation:' + anim('tout', winOut) + '">' + fT(winOut) + '</span>' +
       '<span class="unit">out</span>' +
@@ -198,19 +457,21 @@ function renderHome() {
   h += requestLog();
   return h + '</div>';
 }
+/** @param {number} v @param {number} max @returns {string} */
 function hpc(v, max) { return (((v || 0) / max) * 96).toFixed(2) + '%'; }
 
 /* ---------- request log ----------
    One row per request — the flat log that replaced tokentrace's session table. */
+/** @returns {string} */
 function requestLog() {
   var R = D.recent || [], i, maxMs = 1;
   for (i = 0; i < R.length; i++) if (R[i].ms > maxMs) maxMs = R[i].ms;
 
   var h = '<div style="margin-top:50px"><div class="hdrline"><div class="cap">Requests <span class="sub">· newest first · click a row to inspect</span></div>' +
     '<div class="note">' + fC(D.traced) + ' traced' + (D.unpricedReqs > 0 ? ' · ' + fC(D.unpricedReqs) + ' unpriced' : '') + '</div></div>' +
-    '<div class="thead tgrid"><span>Time</span><span>Model</span><span>Session</span><span>Reply</span><span>St</span>' +
+    '<div class="thead tgrid"><span>Time</span><span>Model</span><span>Session</span><span>Prompt</span><span>Reply</span><span>St</span>' +
     '<span>Stop</span><span class="r">ms</span><span class="r">TTFT</span><span>Token mix</span>' +
-    '<span class="r">in → out</span><span class="r">Cost</span></div>';
+    '<span class="r">new → out</span><span class="r">Cost</span></div>';
 
   if (!R.length) {
     var at = D.port ? '<span class="m">ANTHROPIC_BASE_URL=http://localhost:' + esc(D.port) + '</span>' : 'this proxy';
@@ -222,10 +483,12 @@ function requestLog() {
   return h + '</div></div>';
 }
 
+/** @param {recentRow} q @param {number} maxMs @returns {string} */
 function reqRow(q, maxMs) {
-  var o = opParts(q), isErr = !ok(q), t = tokOf(q);
-  var stC = isErr ? MER : 'rgba(47,191,135,0.85)', stB = isErr ? 'rgba(255,90,90,0.4)' : 'rgba(47,191,135,0.28)';
-  var inTot = (t.in || 0) + (t.read || 0) + (t.write || 0);
+  var o = opParts(q), isErr = !ok(q) && !benign(q), t = tokOf(q);
+  var stC = isErr ? MER : (q.probe ? '#7f7f7f' : 'rgba(47,191,135,0.85)');
+  var stB = isErr ? 'rgba(255,90,90,0.4)' : (q.probe ? 'rgba(255,255,255,0.12)' : 'rgba(47,191,135,0.28)');
+  var newTot = (t.in || 0) + (t.write || 0); // never summed with cache reads — see the Tokens tile
   var barW = Math.min(100, Math.max(1.5, ((q.ms || 0) / maxMs) * 100)).toFixed(1) + '%';
 
   var op = '<span style="display:flex;align-items:center;gap:8px;min-width:0">';
@@ -241,13 +504,18 @@ function reqRow(q, maxMs) {
      a lie about a model we have no rate for. */
   var cost;
   if (unpriced(q)) cost = '<span class="badge unp">unpriced</span>';
-  else if (isErr) cost = '<span class="num" style="color:#5f5f5f">—</span>';
+  else if (isErr || q.probe) cost = '<span class="num" style="color:#5f5f5f">—</span>';
   else cost = '<span class="num" style="color:#e8e8e8">' + fM(rowCost(q), 4) + '</span>';
 
   return '<div class="trow tgrid" data-id="' + esc(q.id) + '">' +
     '<span class="m" style="font-size:10.5px;color:#8f8f8f">' + esc(clock(tms(q))) + '</span>' +
     '<span class="m ell" style="font-size:10.5px;color:#b9b9b9">' + esc(shortModel(q.model)) + '</span>' +
     '<span class="m ell" style="font-size:10px;color:#6f6f6f" title="' + esc(q.sid) + '">' + esc(trunc(q.sid || '—', 9)) + '</span>' +
+    /* What was asked, next to what came back. Three rows can all say end_turn and
+       cost real money, and only the prompt tells you that one of them was you and
+       another was Claude Code paying a model to name the session. Muted on purpose:
+       it is the context for the cost, not a rival to it. */
+    '<span class="m ell" style="font-size:10.5px;color:#8f8f8f" title="' + esc(q.label) + '">' + esc(trunc(q.label || '—', 40)) + '</span>' +
     op +
     '<span class="m" style="font-size:9.5px;color:' + stC + ';border:1px solid ' + stB + ';padding:1px 0;text-align:center">' + esc(q.status) + '</span>' +
     '<span class="m ell" style="font-size:10px;color:' + stopC + '">' + esc(stop) + '</span>' +
@@ -256,11 +524,12 @@ function reqRow(q, maxMs) {
       '<span class="m r" style="flex:none;font-size:10px;color:#7f7f7f">' + fC(q.ms) + '</span></span>' +
     '<span class="m r" style="font-size:10px;color:#7f7f7f">' + (q.ttft > 0 ? fC(q.ttft) : '—') + '</span>' +
     mix(t.read || 0, t.in || 0, t.write || 0, t.out || 0) +
-    '<span class="m r" style="font-size:10.5px;color:#b9b9b9">' + (isErr ? '—' : fT(inTot) + ' → ' + fT(t.out || 0)) + '</span>' +
+    '<span class="m r" style="font-size:10.5px;color:#b9b9b9">' + (isErr || q.probe ? '—' : fT(newTot) + ' → ' + fT(t.out || 0)) + '</span>' +
     '<span class="r">' + cost + '</span></div>';
 }
 
 /* ---------- inspector ---------- */
+/** @param {number} id */
 function openInsp(id) {
   var q = rowOf(id);
   if (!q) return;
@@ -270,17 +539,19 @@ function openInsp(id) {
   el.style.display = 'block';
   el.innerHTML = inspShell(q, null);
   wireInsp();
+  // q is non-null past the guard above and is never reassigned, but tsc drops that
+  // narrowing the moment it crosses into a callback, so both handlers re-assert it.
   fetch('/api/capture?id=' + encodeURIComponent(id)).then(function (res) {
     return res.ok ? res.json() : MISSING; // 404 = the capture row was deleted
   }).then(function (j) {
     if (S.id !== id) return;
     CAP = j || MISSING;
-    el.innerHTML = inspShell(q, CAP);
+    el.innerHTML = inspShell(/** @type {recentRow} */ (q), CAP);
     wireInsp();
   }).catch(function () {
     if (S.id !== id) return;
     CAP = MISSING;
-    el.innerHTML = inspShell(q, MISSING);
+    el.innerHTML = inspShell(/** @type {recentRow} */ (q), MISSING);
     wireInsp();
   });
 }
@@ -293,6 +564,7 @@ function closeInsp() {
 /* j is null while /api/capture is in flight, MISSING once it 404s. Every tab
    handles all three states — a deleted capture must never throw or blank the
    drawer. */
+/** @param {recentRow} q @param {captureView|null} j @returns {string} */
 function inspShell(q, j) {
   var i;
   var opTitle = ok(q) ? (q.op || 'text — completion') : ('error — ' + q.status + (q.errType ? ' ' + q.errType : ''));
@@ -334,8 +606,10 @@ function inspShell(q, j) {
 
 /* Billing: the row's own quartets. No capture needed — and no dollar figure at
    all when the model had no rate. */
+/** @param {recentRow} q @returns {string} */
 function billingTab(q) {
   var c = costOf(q), t = tokOf(q), i;
+  /** @type {[string, string, number, number][]} colour, label, tokens, cost */
   var lanes = [
     [MRD, 'cache read · billed at 0.1×', t.read || 0, c.read || 0],
     [MIN, 'fresh input · 1×', t.in || 0, c.in || 0],
@@ -375,6 +649,7 @@ function billingTab(q) {
    The headline tab: where the money leaks. A stacked tools/system/history byte
    bar, then the capture's itemized sections. When the capture is gone the bar
    survives on the row's own byte splits. */
+/** @param {recentRow} q @param {captureView|null} j @returns {string} */
 function breakdownTab(q, j) {
   var bd = (j && !j.missing && j.breakdown) ? j.breakdown : null;
   var by = bytesOf(q);
@@ -403,6 +678,7 @@ function breakdownTab(q, j) {
 
 /* Summing what we draw is presentation, not folding: these are the denominators
    of the bar above the tables. */
+/** @param {Breakdown} bd @returns {byteSplit} */
 function sumSections(bd) {
   var s = { tools: 0, system: 0, messages: 0, total: 0 }, i;
   for (i = 0; i < (bd.tools || []).length; i++) s.tools += bd.tools[i].bytes || 0;
@@ -412,6 +688,7 @@ function sumSections(bd) {
   return s;
 }
 
+/** @param {recentRow} q @param {byteSplit} sec @returns {string} */
 function stackBar(q, sec) {
   var tot = sec.total || (sec.tools + sec.system + sec.messages) || 1, i;
   var h = '<div class="hdrline" style="margin-top:24px"><div class="cap">Request composition</div>' +
@@ -421,6 +698,7 @@ function stackBar(q, sec) {
     '<span style="width:' + pctOf(sec.tools, tot) + ';background:' + CTOOL + '"></span>' +
     '<span style="width:' + pctOf(sec.system, tot) + ';background:' + CSYS + '"></span>' +
     '<span style="width:' + pctOf(sec.messages, tot) + ';background:' + CHIST + '"></span></div><div style="margin-top:4px">';
+  /** @type {[string, string, number][]} colour, label, bytes */
   var rows = [[CTOOL, 'tool schemas', sec.tools], [CSYS, 'system prompt', sec.system], [CHIST, 'message history', sec.messages]];
   for (i = 0; i < rows.length; i++) {
     h += '<div class="audrow">' + swatch(rows[i][0]) +
@@ -432,6 +710,7 @@ function stackBar(q, sec) {
 }
 
 /* The server sorts tools descending by size, so tools[0] is the bar's scale. */
+/** @param {ToolItem[]} tools @param {byteSplit|null} sec @returns {string} */
 function toolsTable(tools, sec) {
   if (!tools.length) return '<div class="hdrline" style="margin-top:30px"><div class="cap">Tool schemas</div></div>' +
     '<div class="note" style="padding:12px 0">this request shipped no tool schemas</div>';
@@ -453,6 +732,7 @@ function toolsTable(tools, sec) {
   return h;
 }
 
+/** @param {SystemItem[]} sys @returns {string} */
 function systemTable(sys) {
   if (!sys.length) return '';
   var h = '<div class="hdrline" style="margin-top:30px"><div class="cap">System blocks</div>' +
@@ -467,6 +747,7 @@ function systemTable(sys) {
   return h + '</div>';
 }
 
+/** @param {MessageItem[]} msgs @returns {string} */
 function messagesTable(msgs) {
   if (!msgs.length) return '';
   var h = '<div class="hdrline" style="margin-top:30px"><div class="cap">Messages</div>' +
@@ -482,6 +763,7 @@ function messagesTable(msgs) {
   return h + '</div>';
 }
 
+/** @param {Partial<Flags>} f @returns {string} */
 function flagChips(f) {
   var L = [['thinking', f.thinking], ['context management', f.contextManagement], ['output config', f.outputConfig]], i;
   var h = '<div class="cap" style="margin-top:30px">Request flags</div><div style="display:flex;gap:7px;margin-top:10px">';
@@ -492,6 +774,7 @@ function flagChips(f) {
 /* ---------- request / response / raw ----------
    The capture's request is the client's body verbatim; its response is the
    assembled message (blocks, model, stop_reason, usage). */
+/** @param {*} v @returns {string} */
 function inspText(v) {
   if (typeof v === 'string') return v;
   if (Object.prototype.toString.call(v) === '[object Array]') {
@@ -501,6 +784,7 @@ function inspText(v) {
   }
   return v == null ? '' : JSON.stringify(v, null, 2);
 }
+/** @param {*} m one message of the captured request @returns {string} */
 function msgPreview(m) {
   var c = m.content, i, parts = [];
   if (typeof c === 'string') return c;
@@ -515,6 +799,11 @@ function msgPreview(m) {
   }
   return parts.join(' · ');
 }
+/* The captured response is an anthropic.Response — `content` and `stop_reason`.
+   The `raw` and `blocks` probes below predate it and no current server sends
+   either; they cost nothing and they are why this reads as `any` rather than as
+   the struct. */
+/** @param {*} resp @returns {string} */
 function respText(resp) {
   if (!resp) return '';
   if (resp.raw) return resp.raw;
@@ -527,12 +816,15 @@ function respText(resp) {
   if (resp.stop_reason) out.push('stop_reason: ' + resp.stop_reason);
   return out.join('\n\n');
 }
+/** @param {recentRow} q @returns {string} */
 function gone(q) {
   return '<div class="warnbox">The capture for request #' + esc(q.id) + ' was deleted — its body is gone. ' +
     'The request row survives: billing and the byte breakdown still work.</div>';
 }
+/** @returns {string} */
 function loading() { return '<div class="note" style="padding:16px 0">loading…</div>'; }
 
+/** @param {recentRow} q @param {captureView|null} j @returns {string} */
 function requestTab(q, j) {
   if (j === null) return loading();
   if (j.missing) return gone(q);
@@ -563,6 +855,7 @@ function requestTab(q, j) {
   return h + '</div>';
 }
 
+/** @param {recentRow} q @param {captureView|null} j @returns {string} */
 function responseTab(q, j) {
   if (j === null) return loading();
   if (j.missing) return gone(q);
@@ -571,6 +864,7 @@ function responseTab(q, j) {
     '<pre style="max-height:360px">' + esc(respText(j.response)) + '</pre>';
 }
 
+/** @param {recentRow} q @param {captureView|null} j @returns {string} */
 function rawTab(q, j) {
   if (j === null) return loading();
   if (j.missing) return gone(q);
@@ -587,6 +881,7 @@ function rawTab(q, j) {
 
 function wireInsp() {
   $('#ix').onclick = closeInsp;
+  /** @type {NodeListOf<HTMLElement>} */
   var t = document.querySelectorAll('#insp .tab'), i;
   for (i = 0; i < t.length; i++) t[i].onclick = (function (tab) {
     return function () {
@@ -594,7 +889,7 @@ function wireInsp() {
       var q = rowOf(S.id);
       if (q) { $('#insp').innerHTML = inspShell(q, CAP); wireInsp(); }
     };
-  })(t[i].getAttribute('data-tab'));
+  })(/** @type {string} */ (t[i].getAttribute('data-tab'))); // data-tab is written three lines up in inspShell
   var ta = $('#toolsall');
   if (ta) ta.onclick = function () {
     S.toolsAll = !S.toolsAll;
@@ -610,13 +905,14 @@ function render() {
 }
 
 function wire() {
-  var i, els = document.querySelectorAll('[data-id]');
+  var i, els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-id]'));
   for (i = 0; i < els.length; i++) els[i].onclick = (function (id) {
     return function () { hideTip(); openInsp(id); };
   })(Number(els[i].getAttribute('data-id')));
 
   els = document.querySelectorAll('[data-b]');
   for (i = 0; i < els.length; i++) els[i].onmouseenter = (function (b) {
+    /** @param {MouseEvent} ev */
     return function (ev) {
       var tot = (b.costRead || 0) + (b.costIn || 0) + (b.costWrite || 0) + (b.costOut || 0);
       var rows = [[MRD, 'cache read', fT(b.cacheRead)], [MIN, 'fresh input', fT(b.input)],
@@ -625,14 +921,17 @@ function wire() {
       showTip(ev, tipHtml(clockHM(b.t) + ' · ' + b.n + (b.n === 1 ? ' request' : ' requests'), rows,
         fT((b.cacheRead || 0) + (b.input || 0) + (b.cacheWrite || 0)) + ' in · ' + fT(b.output) + ' out · ' + fM(tot, 2)));
     };
-  })((TIPDATA.buckets || [])[Number(els[i].getAttribute('data-b'))] || {});
+    // data-b indexes the very array TIPDATA.buckets was set from, so the `|| {}`
+    // is a belt on a brace: the lookup cannot miss. Asserted, not widened, so the
+    // bucket's fields stay checked inside the handler.
+  })(/** @type {bucket} */ ((TIPDATA.buckets || [])[Number(els[i].getAttribute('data-b'))] || {}));
 
   els = document.querySelectorAll('.col');
   for (i = 0; i < els.length; i++) els[i].onmouseleave = hideTip;
 }
 
 function poll() {
-  fetch('/api/stats').then(function (r) { return r.json(); }).then(function (j) {
+  fetch('/api/stats').then(function (r) { return r.json(); }).then(/** @param {statsView} j */ function (j) {
     if (!j) return;
     D = j;
     D.overview = j.overview || { timeline: [], latency: {} };
