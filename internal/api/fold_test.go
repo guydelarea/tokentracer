@@ -252,6 +252,48 @@ func TestFoldBurnAvgIsFlooredOnAFreshDatabase(t *testing.T) {
 	}
 }
 
+// Token totals are facts, not interpretations — they are the one number on the
+// dashboard that survives the rate table being wrong.
+func TestFoldTokenTotals(t *testing.T) {
+	life := []store.UsageRow{
+		usage(30, "test-model", 100, 200, 300, 400, 50), // outside the window
+		usage(5, "test-model", 10, 20, 30, 40, 5),       // inside
+		usage(1, "test-model", 1, 2, 3, 4, 1),           // inside
+	}
+	window := []store.Row{
+		row(1, 30, "test-model", 100, 200, 300, 400, 50),
+		row(2, 5, "test-model", 10, 20, 30, 40, 5),
+		row(3, 1, "test-model", 1, 2, 3, 4, 1),
+	}
+	v := fold(life, window, nil, testRates, now, testCfg)
+
+	// Lifetime counts every row.
+	wantLife := tokens{In: 111, Read: 222, Write: 333 + 444, Out: 56}
+	if v.Tokens != wantLife {
+		t.Errorf("lifetime tokens = %+v, want %+v", v.Tokens, wantLife)
+	}
+
+	// The window counts only what is in it — the 30-minute-old row is not.
+	wantWin := tokens{In: 11, Read: 22, Write: 33 + 44, Out: 6}
+	if v.Overview.Tokens != wantWin {
+		t.Errorf("window tokens = %+v, want %+v", v.Overview.Tokens, wantWin)
+	}
+}
+
+// A row we could not price still counted real tokens. The token tiles must not
+// inherit the rate table's ignorance.
+func TestFoldCountsTokensOfUnpricedRows(t *testing.T) {
+	life := []store.UsageRow{usage(1, "some-unreleased-model", 1000, 0, 0, 0, 250)}
+	v := fold(life, nil, nil, testRates, now, testCfg)
+
+	if v.UnpricedReqs != 1 || v.Cost != 0 {
+		t.Fatalf("expected an unpriced row: unpriced=%d cost=%v", v.UnpricedReqs, v.Cost)
+	}
+	if v.Tokens.In != 1000 || v.Tokens.Out != 250 {
+		t.Errorf("tokens = %+v — an unpriced row still sent and received real tokens", v.Tokens)
+	}
+}
+
 func TestFoldCacheHitRates(t *testing.T) {
 	// 750k cache reads out of 1M total input → 75%.
 	life := []store.UsageRow{usage(5, "test-model", 150_000, 750_000, 50_000, 50_000, 1000)}
@@ -394,7 +436,7 @@ func TestStatsViewJSONContract(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, k := range []string{"port", "upstream", "traced", "cost", "unpricedReqs", "overview", "recent"} {
+	for _, k := range []string{"port", "upstream", "traced", "cost", "unpricedReqs", "tokens", "overview", "recent"} {
 		if _, ok := got[k]; !ok {
 			t.Errorf("/api/stats is missing the contract key %q", k)
 		}
@@ -404,7 +446,7 @@ func TestStatsViewJSONContract(t *testing.T) {
 	if !ok {
 		t.Fatal("overview is not an object")
 	}
-	for _, k := range []string{"burnNow", "burnAvg", "reqHr", "winReqs", "avgReq", "hitNow", "hitAvg", "peakMin", "latency", "timeline", "windowMin"} {
+	for _, k := range []string{"burnNow", "burnAvg", "reqHr", "winReqs", "avgReq", "hitNow", "hitAvg", "peakMin", "latency", "timeline", "windowMin", "tokens"} {
 		if _, ok := ov[k]; !ok {
 			t.Errorf("overview is missing the contract key %q", k)
 		}
@@ -416,6 +458,21 @@ func TestStatsViewJSONContract(t *testing.T) {
 	for _, k := range []string{"p50Ttft", "p95Ttft"} {
 		if _, ok := lat[k]; !ok {
 			t.Errorf("overview.latency is missing the contract key %q", k)
+		}
+	}
+
+	for _, path := range []struct {
+		name string
+		obj  map[string]any
+	}{{"tokens", got}, {"overview.tokens", ov}} {
+		q, ok := path.obj["tokens"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s is not an object", path.name)
+		}
+		for _, k := range []string{"in", "read", "write", "out"} {
+			if _, ok := q[k]; !ok {
+				t.Errorf("%s is missing the quartet key %q", path.name, k)
+			}
 		}
 	}
 

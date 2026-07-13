@@ -139,6 +139,16 @@ function renderHome() {
   var lat = ov.latency || {}, p50 = lat.p50Ttft || 0, p95 = lat.p95Ttft || 0;
   var latSub = p50 > 0 ? 'p95 ' + fC(p95) + ' ms · time to first token' : 'no timed responses yet';
 
+  /* Tokens: the raw facts, before anybody prices them. "In" is every token the
+     model read — fresh input, cache reads and cache writes — because that is the
+     number that answers "what did I send it". */
+  var wt = ov.tokens || {}, lt = D.tokens || {};
+  var winIn = (wt.in || 0) + (wt.read || 0) + (wt.write || 0), winOut = wt.out || 0;
+  var lifeIn = (lt.in || 0) + (lt.read || 0) + (lt.write || 0), lifeOut = lt.out || 0;
+  var tokSub = D.traced
+    ? 'lifetime ' + fT(lifeIn) + ' in · ' + fT(lifeOut) + ' out'
+    : 'input counts cache reads and writes';
+
   var h = '<div class="wrap" style="padding-top:36px"><div class="tiles">';
   h += '<div><div class="cap">Burn rate · ' + esc(winCap) + '</div>' +
     '<div class="val" style="gap:8px"><span class="big" style="animation:' + anim('burn', burnNow) + '">' + fM(burnNow, 2) + '</span>' +
@@ -150,6 +160,14 @@ function renderHome() {
   h += '<div style="padding-top:5px"><div class="cap">Requests · ' + esc(winCap) + '</div>' +
     '<div class="val" style="gap:8px"><span class="mid" style="animation:' + anim('req', reqHr) + '">' + fC(reqHr) + '</span>' +
     '<span class="unit">/hr</span></div><div class="tile-sub">' + esc(reqSub) + '</div></div>';
+  h += '<div style="padding-top:5px"><div class="cap">Tokens · ' + esc(winCap) + '</div>' +
+    '<div class="val" style="gap:6px">' +
+      '<span class="mid" style="animation:' + anim('tin', winIn) + '">' + fT(winIn) + '</span>' +
+      '<span class="unit">in</span>' +
+      '<span class="unit" style="opacity:0.45;padding:0 1px">→</span>' +
+      '<span class="mid" style="animation:' + anim('tout', winOut) + '">' + fT(winOut) + '</span>' +
+      '<span class="unit">out</span>' +
+    '</div><div class="tile-sub">' + esc(tokSub) + '</div></div>';
   h += '<div style="padding-top:5px"><div class="cap">Latency · TTFT p50</div>' +
     '<div class="val" style="gap:5px"><span class="mid" style="animation:' + anim('ttft', p50) + '">' + (p50 > 0 ? fC(p50) : '—') + '</span>' +
     '<span class="unit">ms</span></div><div class="tile-sub">' + esc(latSub) + '</div></div>';

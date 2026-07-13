@@ -71,7 +71,8 @@ CGO_ENABLED=0 go build ./cmd/tokentracer
 
 The dashboard polls `/api/stats` every two seconds and shows:
 
-- **Overview:** burn rate, cache-hit rate, requests/hr, TTFT p50/p95, and a 60-minute spend timeline stacked by class — cache read, fresh input, cache write, output.
+- **Overview:** burn rate, cache-hit rate, requests/hr, **input and output tokens**, TTFT p50/p95, and a 60-minute spend timeline stacked by class — cache read, fresh input, cache write, output.
+  Input tokens count everything the model read — fresh input, cache reads *and* cache writes — because that is what answers "what did I send it". Tokens are facts: they are the numbers on this page that stay right even if the rate table is wrong.
 - **Request log:** one row per exchange — model, session, op, status, latency, token mix, cost.
 - **Inspector:** click any row for its billing split, system prompt, message history, decoded response, raw body — and the **breakdown**.
 

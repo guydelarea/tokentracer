@@ -22,6 +22,7 @@ type statsView struct {
 	Traced       int         `json:"traced"`
 	Cost         float64     `json:"cost"`
 	UnpricedReqs int         `json:"unpricedReqs"`
+	Tokens       tokens      `json:"tokens"` // lifetime
 	Overview     overview    `json:"overview"`
 	Recent       []recentRow `json:"recent"`
 }
@@ -36,6 +37,7 @@ type overview struct {
 	HitAvg    float64  `json:"hitAvg"`
 	PeakMin   float64  `json:"peakMin"`
 	WindowMin int      `json:"windowMin"`
+	Tokens    tokens   `json:"tokens"` // the current window
 	Latency   latency  `json:"latency"`
 	Timeline  []bucket `json:"timeline"`
 }
@@ -127,7 +129,7 @@ func fold(lifetime []store.UsageRow, window, recent []store.Row, rates []billing
 	}
 
 	// ---- lifetime: total cost, average burn, average cache hit rate ----
-	var lifeIn, lifeRead, lifeWrite int64
+	var lifeIn, lifeRead, lifeWrite, lifeOut int64
 	oldest := now
 	for _, u := range lifetime {
 		at := time.UnixMilli(u.TsMs)
@@ -140,10 +142,12 @@ func fold(lifetime []store.UsageRow, window, recent []store.Row, rates []billing
 		lifeIn += u.In
 		lifeRead += u.Read
 		lifeWrite += u.W5m + u.W1h
+		lifeOut += u.Out
 		if at.Before(oldest) {
 			oldest = at
 		}
 	}
+	v.Tokens = tokens{In: lifeIn, Read: lifeRead, Write: lifeWrite, Out: lifeOut}
 	v.Overview.HitAvg = hitRate(lifeRead, lifeIn+lifeRead+lifeWrite)
 	if len(lifetime) > 0 {
 		// Spread lifetime spend over how long we have been watching — but never
@@ -164,7 +168,7 @@ func fold(lifetime []store.UsageRow, window, recent []store.Row, rates []billing
 	// ---- window: burn now, hit now, latency, per-minute stacking ----
 	winStart := now.Add(-windowMin * time.Minute)
 	var winCost float64
-	var winIn, winRead, winWrite int64
+	var winIn, winRead, winWrite, winOut int64
 	var ttfts []int64
 
 	for _, r := range window {
@@ -202,6 +206,7 @@ func fold(lifetime []store.UsageRow, window, recent []store.Row, rates []billing
 		winIn += u.In
 		winRead += u.Read
 		winWrite += u.Write5m + u.Write1h
+		winOut += u.Out
 		if r.TtftMs > 0 {
 			ttfts = append(ttfts, r.TtftMs)
 		}
@@ -219,6 +224,7 @@ func fold(lifetime []store.UsageRow, window, recent []store.Row, rates []billing
 	if v.Overview.WinReqs > 0 {
 		v.Overview.AvgReq = winCost / float64(v.Overview.WinReqs)
 	}
+	v.Overview.Tokens = tokens{In: winIn, Read: winRead, Write: winWrite, Out: winOut}
 	v.Overview.HitNow = hitRate(winRead, winIn+winRead+winWrite)
 	v.Overview.Latency = latency{P50Ttft: percentile(ttfts, 0.50), P95Ttft: percentile(ttfts, 0.95)}
 
