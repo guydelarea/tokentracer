@@ -1,0 +1,14 @@
+# gitleaks config for tokentracer.
+#
+# A scanner that cries wolf gets ignored, so the known-benign hits are silenced
+# here — and nothing else is.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+[rules.allowlist]
+description = "Dated Claude model identifiers in the generated rate table are public names, not secrets (claude-opus-4-1-20250805 etc). They only trip the entropy heuristic."
+paths = ['''internal/billing/rates\.go''']
+regexes = ['''claude-[a-z0-9.\-]*\d{8}''']
