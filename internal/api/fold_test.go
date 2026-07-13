@@ -230,6 +230,28 @@ func TestFoldBurnAndWindow(t *testing.T) {
 	close(t, "BurnAvg", o.BurnAvg, 18)
 }
 
+// A brand-new database has seen a handful of requests over a few seconds.
+// Dividing by those seconds says "you are burning $191/hr", which is true and
+// worthless. The average is floored at the window until real time has passed.
+func TestFoldBurnAvgIsFlooredOnAFreshDatabase(t *testing.T) {
+	var life []store.UsageRow
+	for range 9 {
+		// Nine requests, all within the same second — $3 each.
+		life = append(life, store.UsageRow{
+			TsMs:     now.Add(-time.Second).UnixMilli(),
+			ModelReq: "test-model",
+			In:       1_000_000,
+		})
+	}
+	o := fold(life, nil, nil, testRates, now, testCfg).Overview
+
+	// $27 over the 10-minute floor → $162/hr, not $27/second-extrapolated.
+	close(t, "BurnAvg", o.BurnAvg, 27/(10.0/60))
+	if o.BurnAvg > 1000 {
+		t.Errorf("BurnAvg = %v — a few seconds of history extrapolated to an absurd hourly rate", o.BurnAvg)
+	}
+}
+
 func TestFoldCacheHitRates(t *testing.T) {
 	// 750k cache reads out of 1M total input → 75%.
 	life := []store.UsageRow{usage(5, "test-model", 150_000, 750_000, 50_000, 50_000, 1000)}

@@ -145,7 +145,13 @@ func fold(lifetime []store.UsageRow, window, recent []store.Row, rates []billing
 		}
 	}
 	v.Overview.HitAvg = hitRate(lifeRead, lifeIn+lifeRead+lifeWrite)
-	if hours := now.Sub(oldest).Hours(); hours > 0 && len(lifetime) > 0 {
+	if len(lifetime) > 0 {
+		// Spread lifetime spend over how long we have been watching — but never
+		// over less than the window. A fresh database has recorded a burst of
+		// requests over a few seconds, and dividing by those seconds extrapolates
+		// to a $191/hr "average" that is arithmetically true and completely
+		// useless. The floor decays out of the way within the first ten minutes.
+		hours := max(now.Sub(oldest), windowMin*time.Minute).Hours()
 		v.Overview.BurnAvg = v.Cost / hours
 	}
 
