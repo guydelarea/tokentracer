@@ -18,6 +18,7 @@ CREATE TABLE requests (
   model_served  TEXT,                         -- from message_start
   status        INTEGER NOT NULL,
   streamed      INTEGER NOT NULL,
+  aborted       INTEGER NOT NULL DEFAULT 0,   -- client hung up; upstream drained, tokens still billed
   duration_ms   INTEGER,
   ttft_ms       INTEGER,                      -- arrival → first upstream body byte
   stop_reason   TEXT,
@@ -46,11 +47,13 @@ Field sources (validated against the real fixture — see spec extraction table)
 | `model_served`, usage columns | SSE `message_start` seeded, `message_delta` merged (later values win per key) |
 | `stop_reason`, `op` | assembled response |
 | `ttft_ms`, `duration_ms` | proxy timing stamps (t0 → first upstream body byte; t0 → EOF) |
-| `err_type`, `err_msg` | non-2xx body `error.type` / `error.message` |
+| `err_type`, `err_msg` | non-2xx body `error.type` / `error.message` (precedence: upstream wins; Recorder rungs `parse`/`panic`/`oversize` only on otherwise-successful exchanges; unparseable non-2xx body → `http_<status>`) |
+| `aborted` | proxy's `ClientAborted` flag — the hangup is a wire fact that exists for one instant in the proxy |
 
 Validation rules:
 - `cache_w5m_tokens` / `cache_w1h_tokens` come from `message_start`'s cache_creation 5m/1h split.
-- Usage columns are nullable — a client abort or upstream error records whatever facts arrived.
+- Usage columns are nullable — a client abort or upstream error records whatever facts arrived (abort additionally drains upstream to EOF, 30s cap, so usage is normally complete).
+- A body the parser doesn't understand still gets a row: `err_type='parse'` (or `'panic'` if recovered) plus the facts that need no parser — timing, status, byte sizes; the capture is still stored. Degradation is **per side**: a bad request body doesn't discard good response facts, or vice versa; `err_msg` names the broken side. The Recorder never loses an exchange it saw; the ladder bottom (insert failure) is retry-once, then a loud stderr drop.
 - No cost column, ever.
 
 ### captures — drill-down blobs (the interpretations source)
@@ -65,7 +68,9 @@ CREATE TABLE captures (
 
 - `request_gz`: exact bytes the client sent — never re-serialized (unknown fields like `thinking`, `context_management`, `output_config` round-trip unharmed).
 - `response_gz`: full assembled message — every block's complete content (thinking text + signature, tool_use `id`/`name`/`input` JSON, text) plus `model`, `stop_reason`, `usage`. NULL if the response never completed.
-- **Relationship**: optional 1:1 with `requests`. `DELETE FROM captures` never touches `requests`; the inspector degrades to fact-row byte splits.
+- **Relationship**: optional 1:1 with `requests`, inserted in the **same transaction** as the fact row — never a capture without facts. `DELETE FROM captures` never touches `requests`; the inspector degrades to fact-row byte splits.
+- **Bodies only, never headers** — the API key lives in `x-api-key`/`authorization`; keeping headers out of the DB is a stated invariant.
+- Response tee is capped (8 MB); overflow keeps the head and records `err_type='oversize'`.
 
 ### schema_migrations
 
@@ -73,9 +78,9 @@ Applied-migration bookkeeping: version integer per applied entry from the ordere
 
 ## In-memory value types (Go)
 
-### proxy.Exchange — proxy → sink handoff
+### record.Exchange — proxy → Recorder handoff
 
-`{Start, TTFT, Duration, Method, Path, Status, Streamed, ReqBody, RespBody}` — raw material; no parsing happened yet.
+`{Start, TTFT, Duration, Method, Path, Status, Streamed, ReqBody, RespBody, RespTruncated, ClientAborted}` — raw material; no parsing happened yet. Defined in `internal/record` along with the `Sink` interface (`Record(Exchange)`); the proxy imports record and filters — every Exchange handed over becomes a row. `record.New(st *store.Store)` borrows the store; `Record` blocks when the bounded queue is full (backpressure over loss, post-stream so the client never feels it); `Close()` drains unconditionally — main owns the shutdown deadline.
 
 ### anthropic.RequestFacts — ParseRequest output
 
@@ -89,11 +94,15 @@ Assembled message: blocks (text / thinking / tool_use with accumulated `input_js
 
 `Tools []{Name, Bytes}` sorted desc; `System []{Bytes, CacheControl}`; `Messages []{Role, Bytes, BlockKinds}`; feature flags (`thinking` / `context_management` / `output_config`). Shares ParseRequest's marshaling rules so **section sums equal the fact-row byte columns** (tested). Not persisted — pure interpretation of the blob.
 
+### api.statsView — fold output
+
+The return type of `fold(lifetime, window, recent, rates, now)` in `internal/api/fold.go` — a pure function, `now` as a parameter. Its json tags **are** the `/api/stats` wire contract; there is no translation layer. All aggregation happens here, per row, because the long-context tier and time-windowed rates make pricing non-additive — SQL sums cannot price correctly. Inputs come from three targeted store queries: `Lifetime()`, `Window(since)`, `Recent(n)`.
+
 ### billing.Rate / billing.Bill
 
-`Rate{Key, InPerM, OutPerM, From, Until}` — ordered slice, substring match on normalized model (strip `anthropic.` prefix, `@date` suffix), first hit wins, `[From, Until)` windows. Multipliers: read 0.1, write-5m 1.25, write-1h 2.0.
+`Rate{Key, InPerM, OutPerM, From, Until, LongCtxThreshold, LongCtxInPerM, LongCtxOutPerM}` — ordered slice, substring match on normalized model (strip `anthropic.` prefix, `@date` suffix), first hit wins, `[From, Until)` windows. Multipliers: read 0.1, write-5m 1.25, write-1h 2.0. Long-context tier applies when total input (input + cache reads + writes) exceeds the threshold (Anthropic's >200K premium pricing). Table generated from LiteLLM's `model_prices_and_context_window.json`, not hand-typed.
 `Bill{Priced bool; In, Read, Write, Out, Total float64}` — `Priced:false` for unknown models, propagated to UI (badge + `unpricedReqs`); never a silent $0.
 
 ## State transitions
 
-A recorded exchange has one lifecycle: **arrived → forwarded → streamed/completed (or aborted/errored) → parsed by sink worker → inserted** (`requests` always; `captures` when there's a body to keep). Rows are immutable after insert; the only mutation in the system is manual capture deletion.
+A recorded exchange has one lifecycle: **arrived → forwarded → streamed/completed (or aborted → upstream drained, or errored) → parsed by the Recorder (parse failure/panic degrades to an `err_type` row, never a dropped row) → inserted in one transaction** (`requests` always; `captures` when there's a body to keep). Rows are immutable after insert; the only mutation in the system is manual capture deletion. On shutdown the Recorder's queue is drained before the DB closes (`Server.Shutdown` → `recorder.Close()` → `store.Close()`).

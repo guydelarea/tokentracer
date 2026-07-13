@@ -10,8 +10,11 @@ All endpoints served from one listener bound to `127.0.0.1:PORT` (default 8787).
 - Response streamed back with `http.Flusher.Flush()` per chunk. Zero parsing on the client path — the client sees a byte-identical stream.
 - **Recorded** only for `POST /v1/messages` (SSE and non-streaming).
 - **Proxied but never recorded**: `POST /v1/messages/count_tokens`, all other paths.
-- Client abort: captured bytes are kept; the fact row records whatever arrived.
-- Non-2xx upstream: body captured; `error.type`/`error.message` extracted to `err_type`/`err_msg`.
+- Client abort: the proxy detaches from the client context and drains upstream to EOF (30s cap) — billed tokens and the final `message_delta` usage are recorded even though the client is gone; the row records `aborted=1`. If the cap hits, the fact row records whatever arrived.
+- Non-2xx upstream: body captured; `error.type`/`error.message` extracted to `err_type`/`err_msg`. Precedence: upstream `error.type` wins the column; Recorder rungs (`parse`/`panic`/`oversize`) appear only on otherwise-successful exchanges; a non-2xx whose error body won't parse gets `err_type='http_<status>'`.
+- Concurrent requests are supported and normal (Claude Code subagents, background haiku calls) — each streams independently; writes serialize in the Recorder's single worker.
+- Unparseable exchange: still recorded — degradation is per side (good-side facts survive; `err_msg` names the broken side) and every rung keeps the capture; recording one bad shape never stops the worker. Insert failure: retry once, then a loud stderr drop — never a crash.
+- Shutdown (SIGINT/SIGTERM), in order: `Server.Shutdown` (bounded grace for in-flight streams and abort drains) → `recorder.Close()` (drains unconditionally) → `store.Close()`.
 
 ## Dashboard surface (loopback only)
 
@@ -59,7 +62,7 @@ Server-side fold over `requests`, priced per row by `billing.Compute` at read ti
 }
 ```
 
-Invariant: all numbers folded server-side in Go; the page only words and draws them.
+Invariant: all numbers folded server-side in Go; the page only words and draws them. Implemented as one pure function — `fold(lifetime, window, recent, rates, now) statsView` in `internal/api/fold.go`; the `statsView` struct's json tags are this contract, so the two cannot drift (a contract test marshals the struct and pins the keys against this document). The handler is query → fold → encode.
 
 ### GET /api/capture?id=N
 
