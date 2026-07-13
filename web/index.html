@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TokenTracer</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ffffff' stroke-width='1.6'><path d='M5 5.5 L11 9 M5 12 L11 9 M5 12 L11 15 M5 18.5 L11 15 M11 9 L19 12 M11 15 L19 12'/><circle cx='5' cy='5.5' r='2'/><circle cx='5' cy='12' r='2'/><circle cx='5' cy='18.5' r='2'/><circle cx='11' cy='9' r='2'/><circle cx='11' cy='15' r='2'/><circle cx='19' cy='12' r='2'/></svg>">
+<link rel="stylesheet" href="/web/app.css">
+</head>
+<body>
+
+<div class="bar-top">
+  <div class="in">
+    <div class="brand">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" style="display:block" aria-hidden="true">
+        <path d="M5 5.5 L11 9 M5 12 L11 9 M5 12 L11 15 M5 18.5 L11 15 M11 9 L19 12 M11 15 L19 12" stroke="#ffffff" stroke-width="1.5"/>
+        <circle cx="5" cy="5.5" r="2" stroke="#ffffff" stroke-width="1.5" fill="#000000"/>
+        <circle cx="5" cy="12" r="2" stroke="#ffffff" stroke-width="1.5" fill="#000000"/>
+        <circle cx="5" cy="18.5" r="2" stroke="#ffffff" stroke-width="1.5" fill="#000000"/>
+        <circle cx="11" cy="9" r="2" stroke="#ffffff" stroke-width="1.5" fill="#000000"/>
+        <circle cx="11" cy="15" r="2" stroke="#ffffff" stroke-width="1.5" fill="#000000"/>
+        <circle cx="19" cy="12" r="2" stroke="#ffffff" stroke-width="1.5" fill="#000000"/>
+      </svg>
+      <div class="word"><b>TOKEN</b><i>TRACER</i></div>
+    </div>
+    <div class="hdrs">
+      <span id="unp" class="badge unp" style="display:none"></span>
+      <div class="live"><span class="dot"></span><span id="route">localhost</span></div>
+      <span id="hdrstat"></span>
+    </div>
+  </div>
+</div>
+
+<div id="app"></div>
+<div id="scrim"></div>
+<div id="insp"></div>
+<div id="tip"></div>
+
+<script src="/web/app.js"></script>
+</body>
+</html>
