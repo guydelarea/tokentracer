@@ -53,8 +53,7 @@ tokentracer/
 ├── cmd/tokentracer/main.go         # env config, wiring, ListenAndServe on 127.0.0.1:PORT
 ├── internal/
 │   ├── proxy/proxy.go              # catch-all reverse handler, streaming tee, latency stamps, Sink handoff
-│   ├── anthropic/request.go        # ParseRequest + BreakdownRequest (pure functions, no I/O)
-│   ├── anthropic/sse.go            # DecodeSSE / DecodeJSON → assembled message + merged usage
+│   ├── anthropic/anthropic.go      # vendor module: ParseRequest, BreakdownRequest, DecodeSSE, DecodeJSON (pure functions, no I/O)
 │   ├── billing/billing.go          # time-keyed rate table, Compute(), unpriced handling
 │   ├── store/store.go              # Open (pragmas, migrations), InsertRequest, InsertCapture
 │   ├── store/queries.go            # read side: recent rows, timeline buckets, lifetime totals
@@ -65,7 +64,7 @@ tokentracer/
     └── replay.sse                  # SSE stream synthesized from the fixture
 ```
 
-**Structure Decision**: single Go module, `internal/` packages by responsibility (proxy / anthropic / billing / store / api), embedded `web/` assets. Matches the spec's repo layout verbatim.
+**Structure Decision**: single Go module, `internal/` packages by responsibility (proxy / anthropic / billing / store / api), embedded `web/` assets. **Vendor pattern**: each API vendor is one self-contained package with a single file — `internal/anthropic/anthropic.go` in v1; future vendors follow it (`internal/openai/openai.go`, …). The vendor package owns everything vendor-specific: request parsing, breakdown, response/SSE decoding.
 
 ## Implementation Milestones (from spec, each independently verifiable)
 

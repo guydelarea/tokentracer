@@ -24,8 +24,7 @@ tokentracer/
 ├── cmd/tokentracer/main.go         # env config, wiring, ListenAndServe on 127.0.0.1:PORT
 ├── internal/
 │   ├── proxy/proxy.go              # catch-all reverse handler, streaming tee, latency stamps
-│   ├── anthropic/request.go        # ParseRequest + BreakdownRequest: model, session id, turns, byte splits, label, per-item breakdown
-│   ├── anthropic/sse.go            # SSE decoder → assembled message + merged usage
+│   ├── anthropic/anthropic.go      # vendor module (one file per vendor): ParseRequest + BreakdownRequest + SSE decoder → assembled message + merged usage
 │   ├── billing/billing.go          # time-keyed rate table, Compute(), unpriced handling
 │   ├── store/store.go              # Open (pragmas, migrations), InsertRequest, InsertCapture
 │   ├── store/queries.go            # read side: recent rows, timeline buckets, lifetime totals
