@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/guydelarea/tokentracer/internal/anthropic"
 	"github.com/guydelarea/tokentracer/internal/record"
 )
 
@@ -151,9 +152,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // recordable is the proxy's filter, and the Recorder's licence to assume every
 // Exchange it receives becomes a row. count_tokens and everything else is
-// proxied and forgotten.
+// proxied and forgotten — on Vertex, count_tokens hides behind the
+// "count-tokens" pseudo-model.
 func recordable(r *http.Request) bool {
-	return r.Method == http.MethodPost && r.URL.Path == "/v1/messages"
+	if r.Method != http.MethodPost {
+		return false
+	}
+	if r.URL.Path == "/v1/messages" {
+		return true
+	}
+	m := anthropic.VertexModel(r.URL.Path)
+	return m != "" && m != "count-tokens"
 }
 
 func (p *Proxy) target(r *http.Request) string {

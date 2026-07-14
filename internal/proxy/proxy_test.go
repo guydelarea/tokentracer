@@ -157,6 +157,32 @@ func TestRecordFilter(t *testing.T) {
 		sink.none(t)
 	})
 
+	t.Run("Vertex Messages calls are recorded", func(t *testing.T) {
+		path := "/v1/projects/p/locations/us-east5/publishers/anthropic/models/claude-sonnet-5:streamRawPredict"
+		resp, err := http.Post(front.URL+path, "application/json", strings.NewReader(`{}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+
+		ex := sink.take(t)
+		if ex.Path != path {
+			t.Errorf("Path = %q", ex.Path)
+		}
+	})
+
+	t.Run("Vertex count-tokens is proxied but never recorded", func(t *testing.T) {
+		path := "/v1/projects/p/locations/us-east5/publishers/anthropic/models/count-tokens:rawPredict"
+		resp, err := http.Post(front.URL+path, "application/json", strings.NewReader(`{}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		sink.none(t)
+	})
+
 	t.Run("other paths are proxied but never recorded", func(t *testing.T) {
 		resp, err := http.Get(front.URL + "/other")
 		if err != nil {

@@ -29,7 +29,7 @@ import (
 // went over the wire) and makes the breakdown's per-item sizes sum exactly to
 // them, because both read the same raw slices.
 type RequestFacts struct {
-	Model     string
+	Model     string // "" when the body named none — Vertex puts it in the URL instead
 	SessionID string // "" when the client sent no recognizable session id
 	Stream    bool
 	Turns     int
@@ -82,6 +82,20 @@ type tool struct {
 // Claude Code packs a JSON document into the metadata.user_id *string*.
 var sessionRe = regexp.MustCompile(`"session_id"\s*:\s*"([^"]+)"`)
 
+// Vertex spells a Messages call as .../publishers/anthropic/models/<model>:streamRawPredict
+// (or :rawPredict when not streaming) and puts the model in the URL, not the body.
+var vertexPathRe = regexp.MustCompile(`/publishers/anthropic/models/([^:/]+):(?:streamRawPredict|rawPredict)$`)
+
+// VertexModel is the model a Vertex-shaped request path names, "" when the path
+// is not a Vertex Messages call. "count-tokens" is Vertex's count_tokens
+// endpoint wearing a model's name — callers that skip count_tokens skip it too.
+func VertexModel(path string) string {
+	if m := vertexPathRe.FindStringSubmatch(path); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
 const labelMax = 64
 
 // ParseRequest extracts the fact-row values from a verbatim request body.
@@ -89,9 +103,6 @@ func ParseRequest(body []byte) (RequestFacts, error) {
 	var req request
 	if err := json.Unmarshal(body, &req); err != nil {
 		return RequestFacts{}, fmt.Errorf("request json: %w", err)
-	}
-	if req.Model == "" {
-		return RequestFacts{}, errors.New("request has no model")
 	}
 
 	f := RequestFacts{

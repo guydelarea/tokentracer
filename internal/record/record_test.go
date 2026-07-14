@@ -174,6 +174,35 @@ func TestRecordHappyPath(t *testing.T) {
 	}
 }
 
+// A Vertex exchange: the model rides in the URL, the body names none, and the
+// reply is one plain JSON message rather than a stream.
+func TestRecordVertexExchange(t *testing.T) {
+	r, st := newRecorder(t)
+	r.Record(Exchange{
+		Start:    time.Now(),
+		Method:   "POST",
+		Path:     "/v1/projects/p/locations/us-east5/publishers/anthropic/models/claude-sonnet-5@20260203:streamRawPredict",
+		Status:   200,
+		ReqBody:  []byte(`{"anthropic_version":"vertex-2023-10-16","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`),
+		RespBody: []byte(`{"type":"message","model":"claude-sonnet-5","stop_reason":"end_turn","content":[{"type":"text","text":"hello"}],"usage":{"input_tokens":10,"output_tokens":5}}`),
+	})
+	rows := rowsOf(t, r, st)
+
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.ModelReq != "claude-sonnet-5@20260203" {
+		t.Errorf("ModelReq = %q, want the model the URL named", row.ModelReq)
+	}
+	if row.ErrType != "" {
+		t.Errorf("ErrType = %q, want empty — a model-less Vertex body is not a parse failure", row.ErrType)
+	}
+	if row.ModelServed != "claude-sonnet-5" || deref(row.OutputTokens) != 5 {
+		t.Errorf("response facts lost: served=%q out=%d", row.ModelServed, deref(row.OutputTokens))
+	}
+}
+
 // Degradation is per side. A request body we cannot read must not cost us the
 // usage facts from a response we could.
 func TestRecordBadRequestGoodResponse(t *testing.T) {

@@ -159,13 +159,19 @@ func buildRequest(row *store.Row, ex Exchange, best *int) {
 		}
 	}()
 
+	// Vertex names the model in the URL, not the body — so the path fills the
+	// column first, and a model the body did name overwrites it below.
+	row.ModelReq = anthropic.VertexModel(ex.Path)
+
 	facts, err := parseRequest(ex.ReqBody)
 	if err != nil {
 		setErr(row, rungParse, "parse", "request: "+err.Error(), best)
 		return
 	}
 
-	row.ModelReq = facts.Model
+	if facts.Model != "" {
+		row.ModelReq = facts.Model
+	}
 	row.SessionID = facts.SessionID
 	row.Label = facts.Label
 	row.Turns = int64(facts.Turns)

@@ -61,6 +61,15 @@ ANTHROPIC_BASE_URL=http://localhost:8787 claude
 
 Open [localhost:8787/dashboard](http://localhost:8787/dashboard) and work as usual. Rows land within two seconds.
 
+Using Claude Code through **Vertex AI**? Point the proxy at your Vertex endpoint — including the `/v1` — and launch with the Vertex env instead. Auth (your `gcloud` ADC token) passes through untouched:
+
+```bash
+UPSTREAM=https://us-east5-aiplatform.googleapis.com/v1 go run ./cmd/tokentracer
+# region "global": UPSTREAM=https://aiplatform.googleapis.com/v1
+
+CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=http://localhost:8787 claude
+```
+
 Build a static binary:
 
 ```bash
@@ -95,15 +104,16 @@ Rates live in `internal/billing/rates.go`, generated from [LiteLLM's price regis
 
 ### Supported clients
 
-v1 records the **Anthropic Messages API** (`POST /v1/messages`, streaming and not) — that is Claude Code. Any client that speaks it and can override its base URL works; existing authentication headers pass through unchanged.
+v1 records the **Anthropic Messages API** (`POST /v1/messages`, streaming and not) — that is Claude Code — and the same calls in their **Vertex AI** spelling (`.../publishers/anthropic/models/<model>:streamRawPredict` and `:rawPredict`, where the model rides in the URL). Any client that speaks either and can override its base URL works; existing authentication headers pass through unchanged.
 
 | Client | Status | Connection |
 | --- | --- | --- |
 | [Claude Code](https://claude.com/claude-code) | Tested | `ANTHROPIC_BASE_URL=http://localhost:8787` |
+| Claude Code via Vertex AI | Should work | `UPSTREAM=https://<region>-aiplatform.googleapis.com/v1`, then `CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=http://localhost:8787` |
 | Anthropic Messages API client | Should work | Set its base URL to `http://localhost:8787` |
 | [OpenCode](https://opencode.ai), [Codex](https://developers.openai.com/codex), [Cursor](https://cursor.com) | Not yet | See the [roadmap](#roadmap) |
 
-Everything else on any other path is proxied through untouched and never recorded, including `count_tokens`.
+Everything else on any other path is proxied through untouched and never recorded, including `count_tokens` (on Vertex: the `count-tokens` pseudo-model).
 
 Sessions are grouped by Claude Code's `session_id`, which it buries inside the `metadata.user_id` string. A client that sends none is recorded fine and groups under `unknown`.
 

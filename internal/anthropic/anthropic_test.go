@@ -139,9 +139,35 @@ func TestParseRequestLabelEdgeCases(t *testing.T) {
 }
 
 func TestParseRequestRejectsGarbage(t *testing.T) {
-	for _, body := range []string{`not json at all`, `{"messages":[]}`, ``} {
+	for _, body := range []string{`not json at all`, ``} {
 		if _, err := ParseRequest([]byte(body)); err == nil {
 			t.Errorf("ParseRequest(%q) = nil error, want an error so the Recorder can degrade", body)
+		}
+	}
+}
+
+// A Vertex body names no model — that is the URL's job, not a parse failure.
+func TestParseRequestToleratesMissingModel(t *testing.T) {
+	got, err := ParseRequest([]byte(`{"anthropic_version":"vertex-2023-10-16","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("ParseRequest: %v", err)
+	}
+	if got.Model != "" || got.Turns != 1 {
+		t.Errorf("Model = %q, Turns = %d; want \"\" and 1", got.Model, got.Turns)
+	}
+}
+
+func TestVertexModel(t *testing.T) {
+	cases := map[string]string{
+		"/v1/projects/p/locations/us-east5/publishers/anthropic/models/claude-sonnet-5:streamRawPredict": "claude-sonnet-5",
+		"/projects/p/locations/global/publishers/anthropic/models/claude-opus-4-5@20251101:rawPredict":   "claude-opus-4-5@20251101",
+		"/v1/projects/p/locations/global/publishers/anthropic/models/count-tokens:rawPredict":            "count-tokens",
+		"/v1/messages":              "",
+		"/v1/messages/count_tokens": "",
+	}
+	for path, want := range cases {
+		if got := VertexModel(path); got != want {
+			t.Errorf("VertexModel(%q) = %q, want %q", path, got, want)
 		}
 	}
 }
