@@ -1,12 +1,16 @@
-/* TokenTracer dashboard. Ported from tokentrace's dashboard.go raw-string page.
+/* TokenTracer dashboard.
+   Synced from the Claude Design project — that file is the source of truth for
+   every colour, size and track width below.
+
    The palette is load-bearing: a colour means the same thing everywhere —
    #2fbf87 cache read, #5aa2f7 fresh input, #d9a04e cache write, #ededed output,
-   #ff5a5a error. */
+   #ff5a5a error, #a78bfa thinking. */
 
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;background:#000}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,'Helvetica Neue',Arial,sans-serif;color:#e8e8e8;-webkit-font-smoothing:antialiased;min-width:1180px;min-height:100vh;background:radial-gradient(1300px 620px at 14% -120px,rgba(90,162,247,0.14),transparent 74%),radial-gradient(1100px 560px at 88% -140px,rgba(47,191,135,0.10),transparent 74%),linear-gradient(180deg,#10131a 0%,#06070c 560px,#000 1200px)}
 @keyframes ttNum{from{opacity:0.15}to{opacity:1}}
+@keyframes ttRowIn{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
 @keyframes ttPulse{0%{opacity:1}50%{opacity:0.2}100%{opacity:1}}
 @keyframes ttPanel{from{opacity:0;transform:translateX(16px)}to{opacity:1;transform:none}}
 @keyframes ttFade{from{opacity:0}to{opacity:1}}
@@ -26,7 +30,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,'Helvetic
 /* line-height is load-bearing: overflow:hidden on a line-height:normal box clips
    the underscore off tool_use, max_tokens and every mcp__server__tool name. */
 .ell{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.6}
-.errtx{color:#ff5a5a}
+.track{display:block;height:3px;background:rgba(255,255,255,0.06)}
+.track i{display:block;height:3px;background:#8f8f8f}
 
 /* header */
 .bar-top{border-bottom:1px solid rgba(255,255,255,0.07)}
@@ -44,19 +49,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,'Helvetic
 .badge{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;padding:2px 6px;white-space:nowrap}
 .badge.unp{color:#d9a04e;border:1px solid rgba(217,160,78,0.45);background:rgba(217,160,78,0.07)}
 
-/* overview tiles */
-/* The Tokens tile carries three numbers (new · cached → out) where the others
-   carry one, so it gets its own track width and its own type scale. Collapsing it
-   back to a single number would fit the grid better and lie about the money. */
-.tiles{display:grid;grid-template-columns:1.05fr 1fr 1fr 1.75fr 0.8fr;gap:22px;align-items:start}
-.val.trio{gap:4px}
-.val.trio .mid{font-size:23px}
-.val.trio .unit{font-size:11.5px}
+/* ---------- overview ---------- */
+.tiles{display:grid;grid-template-columns:1.3fr 1.1fr 0.95fr 0.8fr;gap:48px;align-items:start}
 .tile-sub{margin-top:11px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:#8a8a8a;line-height:1.55}
 .big{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:56px;font-weight:500;line-height:1;letter-spacing:-1.5px;color:#fafafa}
 .mid{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:30px;font-weight:500;line-height:1;color:#f0f0f0}
 .unit{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;color:#666666}
 .val{display:flex;align-items:baseline;gap:6px;margin-top:14px}
+/* The waste tile is a link: it opens the cut list of the session shipping it. */
+.tile.click{cursor:pointer}
+.tile.click:hover{opacity:0.82}
 
 /* legend */
 .leg{display:flex;gap:16px;align-items:center}
@@ -72,27 +74,105 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,'Helvetic
 .col i{display:block;font-style:normal}
 .col .err{position:absolute;top:0;left:20%;right:20%;background:#ff5a5a}
 .axis{display:flex;justify-content:space-between;margin-top:9px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;color:#4f4f4f}
+/* Per-request bars are capped so a short session does not draw fence posts. */
+.chart.perreq .col{max-width:22px;cursor:pointer}
+.chart.perreq .col:hover{opacity:0.72}
+.chart.perreq .err{left:15%;right:15%}
+/* The cumulative-$ line rides over the staircase it is the integral of. */
+.cum{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none}
+.mark{position:absolute;top:0;bottom:0;border-left:1px dashed rgba(255,255,255,0.28);pointer-events:none}
+.mark span{position:absolute;top:-3px;left:5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9px;letter-spacing:0.08em;color:#7a7a7a;white-space:nowrap}
 
-/* request log */
-.thead,.trow{display:grid;align-items:center}
-.thead{padding:12px 0 8px;font-size:9.5px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#565656;border-bottom:1px solid rgba(255,255,255,0.08)}
-/* Twelve tracks. The two elastic ones are PROMPT (what was asked) and REPLY (what
-   came back); everything else is fixed to its widest real content. The minimums
-   plus the fixed tracks plus the gaps must stay under the wrap's inner width at
-   the 1180px floor the page declares — go over and the grid does not wrap, it
-   overflows sideways and silently amputates the Cost column off the right edge. */
-.tgrid{grid-template-columns:58px 84px 62px minmax(150px,1.1fr) minmax(140px,1fr) 40px 76px 56px 56px 76px 96px 72px;gap:0 12px}
-.tgrid.trow{padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.035);cursor:pointer}
-.tgrid.trow:hover{background:rgba(255,255,255,0.03)}
-.tlist{max-height:560px;overflow-y:auto;scrollbar-width:thin}
-.num{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;color:#9f9f9f}
+/* ---------- sessions table ---------- */
+/* Ten tracks. Session is the only elastic one — it carries the prompt, which is
+   the only thing here whose length nobody controls. */
+.sgrid{display:grid;grid-template-columns:46px minmax(230px,1.4fr) 84px 52px 74px 74px 70px 80px 78px 60px;gap:0 16px}
+.shead{padding:12px 0 8px;font-size:9.5px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#565656;border-bottom:1px solid rgba(255,255,255,0.08)}
+.srow{align-items:center;padding:11px 0;border-bottom:1px solid rgba(255,255,255,0.045);cursor:pointer}
+.srow:hover{background:rgba(255,255,255,0.028)}
+.state{display:flex;align-items:center;gap:5px}
+.state .tx{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9.5px;letter-spacing:0.06em}
+.slabel{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.snum{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;text-align:right}
 .mixbar{display:flex;height:5px;overflow:hidden;background:rgba(255,255,255,0.05)}
 .empty{padding:34px 0;font-size:13px;color:#7a7a7a;line-height:1.7}
 .empty .m{color:#c9c9c9}
 
-/* inspector */
+/* ---------- session trace ---------- */
+.back{display:inline-block;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:#8a8a8a;cursor:pointer}
+.back:hover{color:#ffffff}
+.tracehd{margin-top:20px;font-size:19px;font-weight:600;color:#f2f2f2;max-width:920px;line-height:1.35}
+.tracemeta{margin-top:9px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:#6f6f6f}
+/* The stat strip: one row of facts, wrapping. */
+.stats{display:flex;flex-wrap:wrap;gap:30px;margin-top:30px}
+.stats .v{margin-top:9px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:18px;color:#d9d9d9;padding-top:4px}
+.stats .v.lead{font-size:24px;font-weight:500;color:#fafafa;padding-top:0}
+.stats .v .sub{font-size:13px;color:#6f6f6f}
+
+/* Do next: the advice, priced and ranked. */
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:14px}
+.card{border:1px solid rgba(255,255,255,0.09);background:rgba(255,255,255,0.018);padding:16px 18px}
+.card .top{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+.card .tag{font-size:9px;font-weight:600;letter-spacing:0.14em;text-transform:uppercase}
+.card .usd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:15px;color:#fafafa}
+.card .t{margin-top:10px;font-size:13.5px;font-weight:600;color:#ececec;line-height:1.4}
+.card .b{margin-top:8px;font-size:11.5px;color:#8a8a8a;line-height:1.6}
+
+.two{display:grid;gap:60px;margin-top:48px}
+.two.a{grid-template-columns:1.12fr 0.88fr}
+.two.b{grid-template-columns:1.15fr 0.85fr}
+
+/* the stop_reason strip under the output-shape chart */
+.stops{display:flex;gap:1px;margin-top:5px}
+.stops span{flex:1 1 0;min-width:1px;max-width:22px;height:6px}
+.stopnote{display:flex;justify-content:space-between;margin-top:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9.5px;color:#4f4f4f}
+
+.actrow{display:grid;grid-template-columns:minmax(150px,1fr) 42px 84px 60px 38px;gap:12px;align-items:center;padding:9px 0;border-bottom:1px solid rgba(255,255,255,0.045)}
+.actrow .n{font-size:12.5px;color:#c9c9c9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.actrow .n .s{font-size:10.5px;color:#5f5f5f}
+.foot{margin-top:12px;font-size:11px;color:#5f5f5f;line-height:1.6}
+
+/* the cache strip: one cell per request, coloured by what its cache did */
+.cells{display:flex;gap:1px;margin-top:14px}
+.cells span{flex:1 1 0;min-width:1px;max-width:22px;height:14px}
+.breaks{margin-top:16px;border-top:1px solid rgba(255,255,255,0.08)}
+.brow{display:flex;align-items:center;gap:16px;padding:9px 0;border-bottom:1px solid rgba(255,255,255,0.045)}
+.brow .seq{flex:none;width:104px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10.5px;color:#8f8f8f}
+.brow .segs{flex:none;display:inline-flex;gap:1px}
+.brow .segs span{width:14px;height:9px}
+.brow .tx{flex:1 1 0;min-width:0;font-size:11.5px;color:#9f9f9f;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.brow .usd{flex:none;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:#ececec;text-align:right}
+
+.ctxrow{display:grid;grid-template-columns:10px 1fr 90px 52px;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.045)}
+.ctxrow .n{font-size:12.5px;color:#c9c9c9}
+.toprow{display:grid;grid-template-columns:minmax(200px,1fr) 130px 66px 78px;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04)}
+.cutrow{display:grid;grid-template-columns:1fr 74px 84px;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.045)}
+.resrow{display:grid;grid-template-columns:minmax(120px,1fr) 40px 80px 66px 38px;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04)}
+.cuthead{margin-top:16px;font-size:14px;color:#ececec;line-height:1.5}
+.cutsub{margin-top:7px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;color:#8a8a8a}
+.more{display:inline-block;margin-top:14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:#8a8a8a;cursor:pointer;padding:2px 0;border-bottom:1px dotted rgba(255,255,255,0.3)}
+.more:hover{color:#ffffff}
+
+/* the three little charts above the trace list */
+.minis{display:grid;grid-template-columns:1fr 1fr 1fr;gap:44px;margin-top:18px}
+.minis .hd{display:flex;justify-content:space-between;align-items:baseline}
+.minis .hd .t{font-size:9.5px;font-weight:600;letter-spacing:0.12em;text-transform:uppercase;color:#565656}
+.minis .hd .v{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10.5px;color:#8f8f8f}
+.minis .axis{margin-top:7px;font-size:9.5px}
+
+/* the trace list: seven tracks, Operation the only elastic one */
+.qgrid{display:grid;grid-template-columns:64px minmax(280px,1fr) 48px 92px 118px 128px 74px;gap:0 14px}
+.qhead{padding:12px 0 8px;font-size:9.5px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#565656;border-bottom:1px solid rgba(255,255,255,0.08)}
+.qrow{align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.035);cursor:pointer}
+.qrow:hover{background:rgba(255,255,255,0.03)}
+.qrow .op{display:flex;align-items:center;gap:8px;min-width:0}
+.gap{padding:7px 0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;color:#4f4f4f;border-bottom:1px solid rgba(255,255,255,0.035)}
+.lat{display:flex;align-items:center;gap:6px}
+.num{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;color:#9f9f9f}
+
+/* ---------- inspector ---------- */
 #scrim{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.55);z-index:40;animation:ttFade 0.15s ease-out;display:none}
-#insp{position:fixed;top:0;right:0;bottom:0;width:min(660px,94vw);background:linear-gradient(180deg,#11141b 0%,#0b0c10 460px,#0a0a0a 900px);border-left:1px solid rgba(255,255,255,0.09);z-index:41;overflow-y:auto;animation:ttPanel 0.16s ease-out;scrollbar-width:thin;display:none}
+#insp{position:fixed;top:0;right:0;bottom:0;width:min(620px,92vw);background:linear-gradient(180deg,#11141b 0%,#0b0c10 460px,#0a0a0a 900px);border-left:1px solid rgba(255,255,255,0.09);z-index:41;overflow-y:auto;animation:ttPanel 0.16s ease-out;scrollbar-width:thin;display:none}
 #insp .pad{padding:24px 28px 44px}
 #insp .x{background:transparent;border:none;color:#777777;font-size:17px;cursor:pointer;padding:2px 6px;line-height:1;flex:none}
 #insp .x:hover{color:#ffffff}
@@ -107,19 +187,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,'Helvetic
 .warnbox{margin-top:16px;border:1px solid rgba(217,160,78,0.3);background:rgba(217,160,78,0.05);padding:12px 14px;font-size:11.5px;color:#c9a97a;line-height:1.6}
 .lanerow{display:grid;grid-template-columns:10px 1fr 90px 90px;gap:12px;align-items:center;padding:9px 0;border-bottom:1px solid rgba(255,255,255,0.045)}
 .audrow{display:grid;grid-template-columns:10px 1fr 90px 52px;gap:12px;align-items:center;padding:9px 0;border-bottom:1px solid rgba(255,255,255,0.045)}
-.toolrow{display:grid;grid-template-columns:minmax(150px,1fr) 120px 70px 44px;gap:12px;align-items:center;padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.04)}
-.toolrow .track{display:block;height:3px;background:rgba(255,255,255,0.06)}
-.toolrow .track i{display:block;height:3px;background:#8f8f8f}
+.toolrow{display:grid;grid-template-columns:minmax(180px,1fr) 110px 62px 76px;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04)}
 .sysrow{display:grid;grid-template-columns:78px 1fr 70px;gap:12px;align-items:center;padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.04)}
 .msgrow{display:grid;grid-template-columns:78px 1fr 70px;gap:12px;align-items:center;padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.04)}
 .histrow{display:grid;grid-template-columns:76px 1fr 56px;gap:12px;align-items:baseline;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.035)}
-.more{display:inline-block;margin-top:14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:#8a8a8a;cursor:pointer;padding:2px 0;border-bottom:1px dotted rgba(255,255,255,0.3)}
-.more:hover{color:#ffffff}
-.rawbox{margin-top:12px;background:#050505;border:1px solid rgba(255,255,255,0.05);padding:14px;max-height:420px;overflow:auto}
-.rawrow{display:grid;grid-template-columns:36px 1fr;gap:14px}
+.rawbox{margin-top:12px;background:#050505;border:1px solid rgba(255,255,255,0.05);padding:14px;max-height:380px;overflow:auto}
+.rawrow{display:grid;grid-template-columns:30px 1fr;gap:14px}
 .rawn{font-size:10.5px;line-height:1.7;color:#3d3d3d;text-align:right}
 .rawtx{font-size:10.5px;line-height:1.7;color:#9a9a9a;white-space:pre-wrap;word-break:break-word}
-pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:1.65;color:#9a9a9a;background:#050505;border:1px solid rgba(255,255,255,0.05);padding:14px;margin:12px 0 0;white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto}
+pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:1.65;color:#9a9a9a;background:#050505;border:1px solid rgba(255,255,255,0.05);padding:14px;margin:12px 0 0;white-space:pre-wrap;word-break:break-word;max-height:240px;overflow:auto}
 
 #tip{position:fixed;z-index:60;pointer-events:none;display:none;background:#0d0d0d;border:1px solid rgba(255,255,255,0.14);padding:10px 12px;min-width:180px}
 #tip .t{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10.5px;color:#8a8a8a;white-space:nowrap}

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/guydelarea/tokentracer/internal/anthropic"
@@ -24,25 +25,39 @@ type Config struct {
 	Upstream string
 }
 
-// recentLimit is how many rows the request log shows.
-const recentLimit = 200
-
 type server struct {
 	st    *store.Store
 	rates []billing.Rate
 	cfg   Config
 	now   func() time.Time // swapped in tests
+
+	// The sessions table needs each session's tool schemas to know which of them
+	// were never called, and the schemas live in a capture — a body to gunzip and
+	// parse, on a page that polls every two seconds. So they are cached, keyed by
+	// the shape of the toolset itself: a session shipping the same tool_count and
+	// tools_bytes as last time is shipping the same tools, and there is nothing to
+	// re-read. A session's toolset changes about once, when it starts.
+	toolsMu sync.Mutex
+	tools   map[string]cachedTools
+}
+
+// cachedTools is one session's schemas, and the fingerprint of the request they
+// were read from.
+type cachedTools struct {
+	count, bytes int64
+	set          toolset
 }
 
 // Handler returns the dashboard routes. They hold full request captures, so they
 // are loopback-only — enforced here as well as by the listener's bind address,
 // because one line of defence for someone's API traffic is not enough.
 func Handler(st *store.Store, cfg Config) http.Handler {
-	s := &server{st: st, rates: billing.Rates, cfg: cfg, now: time.Now}
+	s := &server{st: st, rates: billing.Rates, cfg: cfg, now: time.Now, tools: map[string]cachedTools{}}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /dashboard", s.dashboard)
 	mux.HandleFunc("GET /api/stats", s.stats)
+	mux.HandleFunc("GET /api/trace", s.trace)
 	mux.HandleFunc("GET /api/capture", s.capture)
 	mux.Handle("GET /web/", http.StripPrefix("/web/", http.FileServer(http.FS(web.FS))))
 	return loopbackOnly(mux)
@@ -89,16 +104,135 @@ func (s *server) stats(w http.ResponseWriter, r *http.Request) {
 		serverError(w, "window", err)
 		return
 	}
-	recent, err := s.st.Recent(recentLimit)
-	if err != nil {
-		serverError(w, "recent", err)
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(fold(lifetime, window, s.toolsets(lifetime), s.rates, now, s.cfg)); err != nil {
+		log.Printf("tokentracer: encoding stats: %v", err)
+	}
+}
+
+// trace folds one session. The capture read is the reason this is its own
+// endpoint rather than a field on /api/stats: it is paid when someone opens a
+// session, not twice a second for every session they aren't looking at.
+func (s *server) trace(w http.ResponseWriter, r *http.Request) {
+	sid := r.URL.Query().Get("sid")
+	if sid == "" {
+		http.NotFound(w, r)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(fold(lifetime, window, recent, s.rates, now, s.cfg)); err != nil {
-		log.Printf("tokentracer: encoding stats: %v", err)
+	rows, err := s.st.Session(dbSid(sid))
+	if err != nil {
+		serverError(w, "session", err)
+		return
 	}
+	if len(rows) == 0 {
+		http.NotFound(w, r)
+		return
+	}
+
+	// The schemas, and what the session's tools have dumped into its context.
+	// Both are read from the latest capture that carried them — and both are
+	// optional: a capture can be deleted, and everything folded from the fact
+	// rows survives that.
+	set, gone := s.toolsOf(sid, rows[len(rows)-1])
+	var results []anthropic.ResultItem
+	if body, err := s.latestBody(rows); err == nil {
+		results = anthropic.ResultsInContext(body)
+	} else {
+		gone = true
+	}
+
+	view := foldTrace(sid, rows, set, results, gone, s.rates, s.now())
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(view); err != nil {
+		log.Printf("tokentracer: encoding trace %q: %v", sid, err)
+	}
+}
+
+// latestBody is the newest captured request body in the session — the context as
+// it stands now, which is the only one the cut list can be computed against.
+func (s *server) latestBody(rows []store.Row) ([]byte, error) {
+	for i := len(rows) - 1; i >= 0; i-- {
+		body, _, err := s.st.Capture(rows[i].ID)
+		if err == nil && len(body) > 0 {
+			return body, nil
+		}
+		if !errors.Is(err, store.ErrNoCapture) {
+			return nil, err
+		}
+	}
+	return nil, store.ErrNoCapture
+}
+
+// toolsets resolves the schemas for every session in the scan, from cache where
+// it can. Called on the stats path, so it must be cheap: the cache turns it into
+// one map lookup per session in the steady state.
+func (s *server) toolsets(lifetime []store.UsageRow) map[string]toolset {
+	// The latest request of each session that shipped any tools at all. A session's
+	// toolset is whatever it ships NOW — a tool dropped an hour ago is not one you
+	// can still cut.
+	type latest struct{ count, bytes int64 }
+	seen := map[string]latest{}
+	for _, u := range lifetime {
+		if u.ToolCount == 0 {
+			continue
+		}
+		sid := u.SessionID
+		if sid == "" {
+			sid = noSessionID
+		}
+		seen[sid] = latest{u.ToolCount, u.ToolsBytes}
+	}
+
+	out := make(map[string]toolset, len(seen))
+	s.toolsMu.Lock()
+	defer s.toolsMu.Unlock()
+	for sid, l := range seen {
+		if c, ok := s.tools[sid]; ok && c.count == l.count && c.bytes == l.bytes {
+			out[sid] = c.set // same shape, same tools: nothing to re-read
+			continue
+		}
+		set, _ := s.readTools(sid)
+		s.tools[sid] = cachedTools{count: l.count, bytes: l.bytes, set: set}
+		out[sid] = set
+	}
+	return out
+}
+
+// toolsOf is toolsets for one session, on the trace path. gone reports that the
+// capture the schemas would have come from is no longer there.
+func (s *server) toolsOf(sid string, latest store.Row) (toolset, bool) {
+	s.toolsMu.Lock()
+	defer s.toolsMu.Unlock()
+	if c, ok := s.tools[sid]; ok && c.count == latest.ToolCount && c.bytes == latest.ToolsBytes {
+		return c.set, false
+	}
+	set, err := s.readTools(sid)
+	if err != nil {
+		return set, true
+	}
+	s.tools[sid] = cachedTools{count: latest.ToolCount, bytes: latest.ToolsBytes, set: set}
+	return set, false
+}
+
+// readTools reads a session's schemas out of its newest capture that had any.
+// Caller holds toolsMu.
+func (s *server) readTools(sid string) (toolset, error) {
+	id, err := s.st.LatestToolsCapture(dbSid(sid))
+	if err != nil {
+		return toolset{}, err
+	}
+	body, _, err := s.st.Capture(id)
+	if err != nil {
+		return toolset{}, err
+	}
+	bd, err := anthropic.BreakdownRequest(body)
+	if err != nil {
+		return toolset{}, err
+	}
+	return toolset{Items: bd.Tools}, nil
 }
 
 // captureView is the /api/capture contract: the two blobs, plus the breakdown

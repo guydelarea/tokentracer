@@ -117,21 +117,34 @@ func TestFoldPricesTheModelThatServedTheRequest(t *testing.T) {
 		r := row(1, 1, "test-model", 1_000_000, 0, 0, 0, 0)
 		r.ModelServed = "imaginary-9"
 
-		v := fold(life, []store.Row{r}, []store.Row{r}, testRates, now, testCfg)
+		v := fold(life, []store.Row{r}, nil, testRates, now, testCfg)
 
 		if v.UnpricedReqs != 1 {
 			t.Errorf("UnpricedReqs = %d, want 1", v.UnpricedReqs)
 		}
 		close(t, "Cost", v.Cost, 0)
-		if v.Recent[0].Priced {
+
+		// The same row, where the page now reads it: inside its session's trace.
+		tr := foldTrace("s", []store.Row{r}, toolset{}, nil, false, testRates, now)
+		if tr.Rows[0].Priced {
 			t.Error("the row came back priced — a model we have no rate for was billed at another model's price")
 		}
-		close(t, "row cost", v.Recent[0].Cost.In, 0)
+		close(t, "row cost", tr.Rows[0].Cost.In, 0)
 		// The name on screen and the number next to it must describe the same model.
-		if v.Recent[0].Model != "imaginary-9" {
-			t.Errorf("Model = %q, want the model that served it", v.Recent[0].Model)
+		if tr.Rows[0].Model != "imaginary-9" {
+			t.Errorf("Model = %q, want the model that served it", tr.Rows[0].Model)
 		}
+		close(t, "trace cost", tr.Cost, 0)
 		close(t, "BurnNow", v.Overview.BurnNow, 0)
+
+		// And on the sessions table, which sums the same per-row prices.
+		if len(v.Sessions) != 1 {
+			t.Fatalf("Sessions = %d, want 1", len(v.Sessions))
+		}
+		if v.Sessions[0].Priced {
+			t.Error("the session came back priced off a model with no rate")
+		}
+		close(t, "session cost", v.Sessions[0].Cost, 0)
 	})
 
 	t.Run("falls back to the requested model when the response never said", func(t *testing.T) {
@@ -145,7 +158,7 @@ func TestFoldPricesTheModelThatServedTheRequest(t *testing.T) {
 	})
 }
 
-func TestFoldRecentRowPricingAndFlags(t *testing.T) {
+func TestTraceRowPricingAndFlags(t *testing.T) {
 	rows := []store.Row{row(7, 1, "test-model", 1_000_000, 1_000_000, 0, 0, 1_000_000)}
 	rows[0].SessionID = "sess-1"
 	rows[0].Op = "tool_use · Bash"
@@ -153,11 +166,11 @@ func TestFoldRecentRowPricingAndFlags(t *testing.T) {
 	rows[0].ModelServed = "test-model-served" // matches the "test-model" rate key by substring
 	rows[0].TotalBytes, rows[0].ToolsBytes, rows[0].SystemBytes, rows[0].MessagesBytes = 1000, 750, 150, 100
 
-	v := fold(nil, nil, rows, testRates, now, testCfg)
-	if len(v.Recent) != 1 {
-		t.Fatalf("len(Recent) = %d", len(v.Recent))
+	v := foldTrace("sess-1", rows, toolset{}, nil, false, testRates, now)
+	if len(v.Rows) != 1 {
+		t.Fatalf("len(Rows) = %d", len(v.Rows))
 	}
-	r := v.Recent[0]
+	r := v.Rows[0]
 
 	if r.ID != 7 || r.Sid != "sess-1" || r.Op != "tool_use · Bash" || r.Stop != "tool_use" {
 		t.Errorf("row fields = %+v", r)
@@ -185,16 +198,17 @@ func TestFoldRecentRowPricingAndFlags(t *testing.T) {
 // An unparsed row carries NULL usage. It still prices (to zero) and still shows.
 func TestFoldHandlesNullUsage(t *testing.T) {
 	r := store.Row{ID: 1, TsMs: now.UnixMilli(), ModelReq: "test-model", Status: 200, ErrType: "parse"}
-	v := fold(nil, []store.Row{r}, []store.Row{r}, testRates, now, testCfg)
+	fold(nil, []store.Row{r}, nil, testRates, now, testCfg) // must not panic on the window pass
 
-	if len(v.Recent) != 1 {
-		t.Fatalf("len(Recent) = %d", len(v.Recent))
+	v := foldTrace("s", []store.Row{r}, toolset{}, nil, false, testRates, now)
+	if len(v.Rows) != 1 {
+		t.Fatalf("len(Rows) = %d", len(v.Rows))
 	}
-	if v.Recent[0].Tok != (tokens{}) {
-		t.Errorf("tok = %+v, want all zeros for a row with no usage", v.Recent[0].Tok)
+	if v.Rows[0].Tok != (tokens{}) {
+		t.Errorf("tok = %+v, want all zeros for a row with no usage", v.Rows[0].Tok)
 	}
-	if v.Recent[0].ErrType != "parse" {
-		t.Errorf("ErrType = %q", v.Recent[0].ErrType)
+	if v.Rows[0].ErrType != "parse" {
+		t.Errorf("ErrType = %q", v.Rows[0].ErrType)
 	}
 }
 
@@ -321,8 +335,8 @@ func TestFoldEmptyDatabase(t *testing.T) {
 		t.Errorf("empty latency = %+v", o.Latency)
 	}
 	// The page must be able to draw this without a single guard.
-	if v.Recent == nil {
-		t.Error("Recent = nil, want an empty array so the page never sees null")
+	if v.Sessions == nil {
+		t.Error("Sessions = nil, want an empty array so the page never sees null")
 	}
 	if b, err := json.Marshal(v); err != nil {
 		t.Fatal(err)
@@ -424,7 +438,7 @@ func TestStatsViewJSONContract(t *testing.T) {
 	v := fold(
 		[]store.UsageRow{usage(1, "test-model", 1, 1, 1, 1, 1)},
 		[]store.Row{row(1, 1, "test-model", 1, 1, 1, 1, 1)},
-		[]store.Row{row(1, 1, "test-model", 1, 1, 1, 1, 1)},
+		nil,
 		testRates, now, testCfg,
 	)
 	b, err := json.Marshal(v)
@@ -436,7 +450,7 @@ func TestStatsViewJSONContract(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, k := range []string{"port", "upstream", "traced", "cost", "unpricedReqs", "tokens", "overview", "recent"} {
+	for _, k := range []string{"port", "upstream", "traced", "cost", "unpricedReqs", "tokens", "overview", "sessions"} {
 		if _, ok := got[k]; !ok {
 			t.Errorf("/api/stats is missing the contract key %q", k)
 		}
@@ -446,7 +460,8 @@ func TestStatsViewJSONContract(t *testing.T) {
 	if !ok {
 		t.Fatal("overview is not an object")
 	}
-	for _, k := range []string{"burnNow", "burnAvg", "reqHr", "winReqs", "avgReq", "hitNow", "hitAvg", "peakMin", "latency", "timeline", "windowMin", "tokens"} {
+	for _, k := range []string{"burnNow", "burnAvg", "reqHr", "winReqs", "avgReq", "hitNow", "hitAvg", "peakMin",
+		"latency", "timeline", "windowMin", "tokens", "wasteHr", "unusedCount"} {
 		if _, ok := ov[k]; !ok {
 			t.Errorf("overview is missing the contract key %q", k)
 		}
@@ -490,17 +505,56 @@ func TestStatsViewJSONContract(t *testing.T) {
 		}
 	}
 
-	rec, ok := got["recent"].([]any)
-	if !ok || len(rec) != 1 {
-		t.Fatalf("recent is not a 1-element array: %T", got["recent"])
+	sess, ok := got["sessions"].([]any)
+	if !ok || len(sess) != 1 {
+		t.Fatalf("sessions is not a 1-element array: %T", got["sessions"])
 	}
-	r0, ok := rec[0].(map[string]any)
+	s0, ok := sess[0].(map[string]any)
 	if !ok {
-		t.Fatal("recent row is not an object")
+		t.Fatal("session row is not an object")
 	}
-	for _, k := range []string{"id", "time", "model", "sid", "op", "status", "ms", "ttft", "stop", "tok", "cost", "priced", "bytes"} {
+	for _, k := range []string{"id", "label", "model", "live", "idle", "last", "req", "err", "tok", "cost",
+		"rateHr", "hit", "unused", "unusedTok", "wasteHr", "priced", "contextWindow"} {
+		if _, ok := s0[k]; !ok {
+			t.Errorf("session row is missing the contract key %q", k)
+		}
+	}
+}
+
+// The json tags of traceView ARE the /api/trace contract — the same rule, for
+// the screen that now carries the request rows.
+func TestTraceViewJSONContract(t *testing.T) {
+	r := row(1, 1, "test-model", 1, 1, 1, 1, 1)
+	r.SessionID = "s"
+	b, err := json.Marshal(foldTrace("s", []store.Row{r}, toolset{}, nil, false, testRates, now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, k := range []string{"sid", "label", "model", "live", "idle", "durMs", "req", "err", "cost", "avgReq",
+		"tok", "hit", "ctx", "contextWindow", "ctxBytes", "rows", "cache", "breaks", "breakCost", "compacted",
+		"out", "activity", "buckets", "tools", "cut", "unusedTok", "insights"} {
+		if _, ok := got[k]; !ok {
+			t.Errorf("/api/trace is missing the contract key %q", k)
+		}
+	}
+
+	rows, ok := got["rows"].([]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("rows is not a 1-element array: %T", got["rows"])
+	}
+	r0, ok := rows[0].(map[string]any)
+	if !ok {
+		t.Fatal("trace row is not an object")
+	}
+	for _, k := range []string{"id", "time", "model", "sid", "op", "status", "ms", "ttft", "stop", "tok", "cost",
+		"priced", "shape", "bytes"} {
 		if _, ok := r0[k]; !ok {
-			t.Errorf("recent row is missing the contract key %q", k)
+			t.Errorf("trace row is missing the contract key %q", k)
 		}
 	}
 	for _, sub := range []string{"tok", "cost"} {
@@ -558,7 +612,7 @@ func TestFoldQuotaProbeIsNotAnError(t *testing.T) {
 	deadKey.ErrType = "authentication_error"
 
 	rows := []store.Row{probe, real429, deadKey}
-	v := fold(nil, rows, rows, testRates, now, testCfg)
+	v := fold(nil, rows, nil, testRates, now, testCfg)
 
 	var errs int
 	for _, b := range v.Overview.Timeline {
@@ -568,11 +622,17 @@ func TestFoldQuotaProbeIsNotAnError(t *testing.T) {
 		t.Errorf("timeline errors = %d, want 2 (the real 429 and the probe's 401, never the probe's 429)", errs)
 	}
 
-	if !v.Recent[0].Probe {
+	tr := foldTrace("s", rows, toolset{}, nil, false, testRates, now)
+	if !tr.Rows[0].Probe {
 		t.Error("the max_tokens:1 row should be flagged Probe so the page can draw it grey")
 	}
-	if v.Recent[1].Probe {
+	if tr.Rows[1].Probe {
 		t.Error("a real 429 from a real request must never be written off as a probe")
+	}
+	// The same forgiveness has to hold where the sessions table counts errors, or
+	// every session on the page opens with one.
+	if tr.Err != 2 {
+		t.Errorf("trace errors = %d, want 2 — the probe's own 429 is not one of them", tr.Err)
 	}
 	if !benignErr(probe) {
 		t.Error("a probe's 429 is the answer to it, not a failure of it")

@@ -21,6 +21,57 @@ const (
 	Write1hMult = 2.0
 )
 
+// CacheTTL is how long a cached prefix survives with no traffic on it. An idle
+// gap longer than this re-writes the whole prefix even though not one byte
+// changed — a cache break the prefix hashes cannot explain, and the only one
+// that is nobody's fault. The trace has to know the number to say so, and it
+// belongs here with the multipliers rather than as a literal in the browser.
+const CacheTTL = 5 * time.Minute
+
+// What a cache break actually costs, as a share of the bill it produced.
+//
+// Not fudge factors: a prefix that had hit would have billed at ReadMult, so the
+// *extra* a break costs is everything above that. Both fall out of the
+// multipliers above, which is why neither is written as a decimal.
+const (
+	RebillWriteShare = 1 - ReadMult/Write5mMult // a re-written prefix vs. one that hit
+	RebillFreshShare = 1 - ReadMult             // input billed fresh vs. read from cache
+)
+
+// ContextWindow is how many tokens the model will hold — the denominator of the
+// trace's "% of window" gauge, and the number "compact now" is advice on the
+// strength of.
+//
+// A window is a fact about the model, so it is keyword-matched off the id here
+// like a price, not written into the page: the page cannot know which model a
+// session ran on, and scoring a 1M-context session against 200k would show it as
+// five times as full as it is.
+//
+// ponytail: two sizes, first match wins. Add a row when a tier ships a third.
+func ContextWindow(model string) int64 {
+	if strings.Contains(normalize(model), "[1m]") {
+		return 1_000_000
+	}
+	return 200_000
+}
+
+// ReadPerTok is what one token costs to re-read out of the cached prefix — the
+// price of a schema that ships on every request and is never called. Zero when
+// the model has no rate, which is how an unpriced session shows no waste rather
+// than a confident $0.00.
+func ReadPerTok(rates []Rate, model string, at time.Time) float64 {
+	r, ok := match(rates, normalize(model), at)
+	if !ok {
+		return 0
+	}
+	return r.InPerM / 1e6 * ReadMult
+}
+
+// EstTokens is bytes → tokens, the standard 4:1 approximation. Used only where
+// the API never gives a real count: the size of an individual tool schema inside
+// a prefix the API prices as one lump.
+func EstTokens(bytes int64) int64 { return (bytes + 2) / 4 }
+
 // Rate is one price line: a model key, its per-million-token rates, and the
 // window in which they applied.
 type Rate struct {

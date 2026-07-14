@@ -30,7 +30,15 @@ CREATE TABLE requests (
   -- request shape (the composition facts behind "where money leaks")
   turns INTEGER, tool_count INTEGER,
   total_bytes INTEGER, tools_bytes INTEGER, system_bytes INTEGER, messages_bytes INTEGER,
-  err_type TEXT, err_msg TEXT
+  err_type TEXT, err_msg TEXT,
+  max_tokens INTEGER,                          -- migration 2: the request's own output cap; 1 = a probe, not a failure
+  -- migration 3: the two derived facts the session trace cannot fold without.
+  -- Both come from bodies we only hold at record time, and both must outlive the
+  -- capture they came from — a capture can be deleted; a diagnosis should not die with it.
+  think_tokens INTEGER,                        -- output tokens by block type: an ESTIMATE, split by
+  text_tokens  INTEGER,                        -- block bytes, because the API bills one output figure
+  tool_tokens  INTEGER,                        -- and never says which block spent it
+  prefix       TEXT                            -- JSON array: cumulative cache-prefix hashes, tools → system → each message
 );
 CREATE INDEX idx_requests_ts      ON requests(ts_ms);
 CREATE INDEX idx_requests_session ON requests(session_id, ts_ms);
@@ -49,6 +57,8 @@ Field sources (validated against the real fixture — see spec extraction table)
 | `ttft_ms`, `duration_ms` | proxy timing stamps (t0 → first upstream body byte; t0 → EOF) |
 | `err_type`, `err_msg` | non-2xx body `error.type` / `error.message` (precedence: upstream wins; Recorder rungs `parse`/`panic`/`oversize` only on otherwise-successful exchanges; unparseable non-2xx body → `http_<status>`) |
 | `aborted` | proxy's `ClientAborted` flag — the hangup is a wire fact that exists for one instant in the proxy |
+| `think/text/tool_tokens` | `anthropic.SplitOutput` — billed `output_tokens` apportioned across the response's blocks by their bytes. Text takes the remainder, so the three always sum to exactly what the API billed |
+| `prefix` | `anthropic.PrefixHashes` — a hash chained over the request's cache prefix (tools, then system, then each message), hashing the **raw wire bytes**. Prompt caching is a prefix match over that sequence, so the first index at which two requests' chains differ *is* what invalidated the cache: `0` the toolset, `1` the system prompt, `2+n` message *n* |
 
 Validation rules:
 - `cache_w5m_tokens` / `cache_w1h_tokens` come from `message_start`'s cache_creation 5m/1h split.

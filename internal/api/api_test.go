@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -106,15 +107,44 @@ func TestStatsSmoke(t *testing.T) {
 	if v.Traced != 1 {
 		t.Errorf("Traced = %d, want 1", v.Traced)
 	}
-	if len(v.Recent) != 1 || v.Recent[0].ID != id {
-		t.Fatalf("Recent = %+v", v.Recent)
+	if len(v.Sessions) != 1 {
+		t.Fatalf("Sessions = %+v", v.Sessions)
 	}
 	// The fixture's model is in the seed table, so a real row must price.
-	if !v.Recent[0].Priced {
+	if !v.Sessions[0].Priced {
 		t.Error("claude-sonnet-5 came back unpriced — the seed rate table has a hole")
 	}
 	if v.Cost <= 0 {
 		t.Errorf("Cost = %v, want > 0", v.Cost)
+	}
+
+	// The request itself lives one level down, in its session's trace.
+	rec = get(t, h, "/api/trace?sid="+url.QueryEscape(v.Sessions[0].ID), "127.0.0.1:1234")
+	if rec.Code != 200 {
+		t.Fatalf("/api/trace → %d", rec.Code)
+	}
+	var tr traceView
+	if err := json.Unmarshal(rec.Body.Bytes(), &tr); err != nil {
+		t.Fatalf("trace is not valid JSON: %v", err)
+	}
+	if len(tr.Rows) != 1 || tr.Rows[0].ID != id {
+		t.Fatalf("trace rows = %+v", tr.Rows)
+	}
+	if !tr.Rows[0].Priced {
+		t.Error("the traced row came back unpriced")
+	}
+}
+
+// A session nobody recorded has no trace, and asking for one is not an error the
+// page has to handle — it is a 404.
+func TestTraceUnknownSession(t *testing.T) {
+	h, _, _ := newServer(t)
+
+	if code := get(t, h, "/api/trace?sid=nope", "127.0.0.1:1234").Code; code != 404 {
+		t.Errorf("unknown session → %d, want 404", code)
+	}
+	if code := get(t, h, "/api/trace", "127.0.0.1:1234").Code; code != 404 {
+		t.Errorf("no sid → %d, want 404", code)
 	}
 }
 
@@ -188,8 +218,23 @@ func TestCapture(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
 			t.Fatal(err)
 		}
-		if v.Traced != 1 || len(v.Recent) != 1 {
-			t.Errorf("deleting the capture took the fact row with it: traced=%d recent=%d", v.Traced, len(v.Recent))
+		if v.Traced != 1 || len(v.Sessions) != 1 {
+			t.Errorf("deleting the capture took the fact row with it: traced=%d sessions=%d", v.Traced, len(v.Sessions))
+		}
+
+		// And the trace still folds: the schemas and the tool-result rows are gone
+		// with the body, and it says so, but every number derived from the fact row
+		// survives.
+		rec = get(t, h, "/api/trace?sid="+url.QueryEscape(v.Sessions[0].ID), "127.0.0.1:1234")
+		var tr traceView
+		if err := json.Unmarshal(rec.Body.Bytes(), &tr); err != nil {
+			t.Fatal(err)
+		}
+		if len(tr.Rows) != 1 {
+			t.Errorf("trace lost its row when the capture went: %+v", tr.Rows)
+		}
+		if !tr.CaptureGone {
+			t.Error("the trace did not admit that the capture it reads schemas from is gone")
 		}
 	})
 }

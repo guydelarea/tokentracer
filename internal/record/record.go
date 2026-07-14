@@ -174,6 +174,15 @@ func buildRequest(row *store.Row, ex Exchange, best *int) {
 	row.ToolsBytes = int64(facts.ToolsBytes)
 	row.SystemBytes = int64(facts.SystemBytes)
 	row.MessagesBytes = int64(facts.MessagesBytes)
+
+	// The cache prefix chain, hashed while the body is in hand. It has to be now:
+	// it is a fact about the bytes that were sent, and the capture they were sent
+	// as can be deleted out from under the diagnosis that needs them.
+	if h := anthropic.PrefixHashes(ex.ReqBody); len(h) > 0 {
+		if b, err := json.Marshal(h); err == nil {
+			row.Prefix = string(b)
+		}
+	}
 	// The proxy's Streamed came off the response content-type; the request's own
 	// stream flag is the better fact when the response never arrived.
 	if !row.Streamed {
@@ -220,6 +229,7 @@ func buildResponse(row *store.Row, ex Exchange, best *int) (respJSON []byte) {
 	row.CacheReadTokens = ptr(resp.Usage.CacheRead)
 	row.CacheW5mTokens = ptr(resp.Usage.W5m)
 	row.CacheW1hTokens = ptr(resp.Usage.W1h)
+	row.ThinkTokens, row.TextTokens, row.ToolTokens = anthropic.SplitOutput(resp.Usage.Out, resp.Content)
 
 	// A 200 whose stream carried an error event is still the upstream saying no.
 	if resp.ErrType != "" {

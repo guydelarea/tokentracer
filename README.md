@@ -24,7 +24,7 @@
 </p>
 
 <p align="center">
-  <img alt="TokenTracer dashboard showing spend, cache hit rate, latency and a request log" src="docs/screenshot.png" />
+  <img alt="TokenTracer dashboard showing burn rate, what could have been saved, cache hit rate and the sessions table" src="docs/screenshot.png" />
 </p>
 
 ---
@@ -69,16 +69,18 @@ CGO_ENABLED=0 go build ./cmd/tokentracer
 
 ### Dashboard
 
-The dashboard polls `/api/stats` every two seconds and shows:
+The dashboard polls every two seconds. It has three screens, and they nest:
 
-- **Overview:** burn rate, cache-hit rate, requests/hr, **input and output tokens**, TTFT p50/p95, and a 60-minute spend timeline stacked by class — cache read, fresh input, cache write, output.
-  Input tokens count everything the model read — fresh input, cache reads *and* cache writes — because that is what answers "what did I send it". Tokens are facts: they are the numbers on this page that stay right even if the rate table is wrong.
-- **Request log:** one row per exchange — model, session, op, status, latency, token mix, cost.
-- **Inspector:** click any row for its billing split, system prompt, message history, decoded response, raw body — and the **breakdown**.
+- **Overview** — burn rate, **could have saved**, cache-hit rate, requests/hr, a 60-minute spend timeline stacked by class (cache read, fresh input, cache write, output), and the **sessions table**.
+  There is no flat request log. A request is not a thing anyone did — a session is — and the twenty requests that made up one turn are noise until you have picked the session they belong to.
+- **Session trace** — click a session. Where its money went: the context staircase (every request re-ships the whole conversation, and the cumulative-$ line over it is the integral of that climb), what the replies were made of, which requests broke the cache **and why**, what the tools have dumped into the context, and a **cut list** — the schemas it ships on every request and has never once called, priced one at a time.
+- **Inspector** — click a request. Its billing split, its byte composition, system prompt, message history, decoded response, raw body.
 
-The breakdown is the point of the whole thing. It itemizes a single request: every tool schema, system block, and message, named and sized. On a real Claude Code turn, **tool schemas are ~76% of what goes over the wire** — 119 schemas, the largest 21 KB, the smallest 149 B, resent in full on every turn. Your prompt is not what costs you money.
+**Do next** is the point of the whole thing. Each card is a fact with a price on it, ranked by what it costs, and each one is computed in Go where a test can hold it to account. On a real Claude Code session: *119 schemas ride on every request and were never invoked* — 53.7k tokens, resent every turn. Your prompt is not what costs you money.
 
-Every number is folded server-side in Go. The page only words and draws them.
+Cache breaks are priced the only honest way: at what the request cost **above what a cache hit would have cost**. An idle gap past the 5-minute TTL re-writes the entire prefix even though not one byte changed — on the session in the screenshot, that alone re-billed $0.92 of a $1.18 bill.
+
+Every number is folded server-side in Go. The page only words and draws them — including the advice.
 
 ### Unpriced, never $0
 
@@ -138,7 +140,7 @@ Captures are the expensive part, and they are bigger than you would guess. Measu
 - **~100 KB gzipped per request**, dominated by the tool schemas resent on every turn.
 - 10 requests ≈ 1 MB. A heavy day of a few thousand requests is **hundreds of MB**.
 
-Retention is manual in v1. Deleting captures never touches the facts — the request log, all costs, and every number on the dashboard survive; only the per-request drill-down degrades to the byte splits already on the row:
+Retention is manual in v1. Deleting captures never touches the facts — the sessions table, every trace, all costs, and the cache diagnosis survive, because the prefix hashes and the output split live on the request row, not in the blob. Only what can be read *nowhere else* goes: the itemized schemas, the cut list, and the per-request drill-down, which degrade to the byte splits already on the row:
 
 ```bash
 sqlite3 tokentracer.db 'delete from captures'   # reclaim the space

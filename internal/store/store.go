@@ -68,6 +68,22 @@ type Row struct {
 	Turns     int64
 	ToolCount int64
 
+	// The reply's shape: the billed output tokens apportioned across the block
+	// types that produced them. An estimate — the API bills one output figure and
+	// never says which block spent it — so it is split by block bytes at record
+	// time, when the blocks are in hand.
+	ThinkTokens int64
+	TextTokens  int64
+	ToolTokens  int64
+
+	// Prefix is the request's cumulative cache-prefix hash chain, tools → system →
+	// each message, as a JSON array. Prompt caching is a prefix match: the first
+	// index at which two requests' chains differ IS what invalidated the cache, so
+	// comparing a row against the one before it names the segment that broke it.
+	// On the row rather than derived from the capture, because a capture can be
+	// deleted and the diagnosis should outlive it.
+	Prefix string
+
 	// MaxTokens is the request's own output cap. 0 means we never learned it.
 	// It is what tells a real request apart from a client's probe: nothing that
 	// wants an answer asks for one token.
@@ -100,6 +116,20 @@ type UsageRow struct {
 	ModelServed string // "" when the response never told us
 
 	In, Out, Read, W5m, W1h int64
+
+	// Session identity, and just enough of the row to fold one. The sessions table
+	// aggregates over every request ever recorded, not the last N, so it has to
+	// ride on the one scan that already reads them all rather than pay for a
+	// second. Op names the tool a turn called, which is how a session learns which
+	// of its schemas it never used; MaxTokens and ToolCount tell a probe from a
+	// failure; ToolsBytes keys the toolset cache that reads the schemas themselves.
+	SessionID  string
+	Status     int
+	Label      string
+	Op         string
+	MaxTokens  int64
+	ToolCount  int64
+	ToolsBytes int64
 }
 
 // Store is a handle on the database file. It is safe for concurrent use: the
@@ -153,6 +183,17 @@ CREATE TABLE captures (
 	// with a 429 by design, and without this we count it as an error forever.
 	// NULL on every pre-existing row: we cannot know, and will not guess.
 	`ALTER TABLE requests ADD COLUMN max_tokens INTEGER;`,
+
+	// 3 — the two facts the session trace cannot fold without: how the reply's
+	// output tokens were spent (thinking vs text vs tool calls), and the cache
+	// prefix chain that says which segment of a request broke the cache. Both are
+	// derived from bodies we hold only at record time, and both must outlive the
+	// capture they came from. NULL on every pre-existing row: those sessions draw
+	// the panels they can and say nothing about the ones they cannot.
+	`ALTER TABLE requests ADD COLUMN think_tokens INTEGER;
+	 ALTER TABLE requests ADD COLUMN text_tokens INTEGER;
+	 ALTER TABLE requests ADD COLUMN tool_tokens INTEGER;
+	 ALTER TABLE requests ADD COLUMN prefix TEXT;`,
 }
 
 // Open opens (creating if needed) the database at path, applies the pragmas
@@ -260,8 +301,9 @@ INSERT INTO requests (
 	duration_ms, ttft_ms, stop_reason, op, label,
 	input_tokens, output_tokens, cache_read_tokens, cache_w5m_tokens, cache_w1h_tokens,
 	turns, tool_count, max_tokens, total_bytes, tools_bytes, system_bytes, messages_bytes,
-	err_type, err_msg
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	err_type, err_msg,
+	think_tokens, text_tokens, tool_tokens, prefix
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // InsertExchange writes the fact row and, when there is a body worth keeping,
 // the capture — in one transaction. There is never a capture without facts.
@@ -287,6 +329,7 @@ func (s *Store) InsertExchange(r Row, reqBody, respBody []byte) (int64, error) {
 		r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheW5mTokens, r.CacheW1hTokens,
 		r.Turns, r.ToolCount, nullInt(r.MaxTokens), r.TotalBytes, r.ToolsBytes, r.SystemBytes, r.MessagesBytes,
 		nullStr(r.ErrType), nullStr(r.ErrMsg),
+		r.ThinkTokens, r.TextTokens, r.ToolTokens, nullStr(r.Prefix),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("store: insert request: %w", err)
