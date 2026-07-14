@@ -51,24 +51,28 @@ cd tokentracer
 go run ./cmd/tokentracer
 ```
 
-No setup, no wizard, no `.env`. It listens on `:8787` and forwards to `https://api.anthropic.com`, writing `./tokentracer.db`.
+On first run it asks one question — which client you use — and saves the answer to `./.env`:
 
-In another terminal, point Claude Code at the proxy:
+```text
+tokentracer: first-run setup — which client?
+  1) Claude Code — Anthropic API (default)
+  2) Claude Code — Vertex AI
+  3) Other — paste an upstream base URL
+```
+
+Pick 2 for **Vertex AI** and it asks for your region (blank = global), pointing the proxy at the right Google endpoint. Auth (your `gcloud` ADC token) passes through untouched. Re-run the wizard anytime with `go run ./cmd/tokentracer setup`; a set `UPSTREAM` env var always outranks the saved answer, and non-interactive runs (pipes, CI) skip the wizard and use the defaults.
+
+Then it listens on `:8787` and forwards upstream, writing `./tokentracer.db`. In another terminal, launch your client through the proxy — the startup log prints the exact line for your backend:
 
 ```bash
+# Anthropic API
 ANTHROPIC_BASE_URL=http://localhost:8787 claude
+
+# Vertex AI
+CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=http://localhost:8787 claude
 ```
 
 Open [localhost:8787/dashboard](http://localhost:8787/dashboard) and work as usual. Rows land within two seconds.
-
-Using Claude Code through **Vertex AI**? Point the proxy at your Vertex endpoint — including the `/v1` — and launch with the Vertex env instead. Auth (your `gcloud` ADC token) passes through untouched:
-
-```bash
-UPSTREAM=https://us-east5-aiplatform.googleapis.com/v1 go run ./cmd/tokentracer
-# region "global": UPSTREAM=https://aiplatform.googleapis.com/v1
-
-CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=http://localhost:8787 claude
-```
 
 Build a static binary:
 
@@ -109,7 +113,7 @@ v1 records the **Anthropic Messages API** (`POST /v1/messages`, streaming and no
 | Client | Status | Connection |
 | --- | --- | --- |
 | [Claude Code](https://claude.com/claude-code) | Tested | `ANTHROPIC_BASE_URL=http://localhost:8787` |
-| Claude Code via Vertex AI | Should work | `UPSTREAM=https://<region>-aiplatform.googleapis.com/v1`, then `CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=http://localhost:8787` |
+| Claude Code via Vertex AI | Should work | Pick *Vertex AI* in the setup wizard, then `CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=http://localhost:8787` |
 | Anthropic Messages API client | Should work | Set its base URL to `http://localhost:8787` |
 | [OpenCode](https://opencode.ai), [Codex](https://developers.openai.com/codex), [Cursor](https://cursor.com) | Not yet | See the [roadmap](#roadmap) |
 
@@ -178,12 +182,12 @@ The rows hold raw API usage and no prices — pricing happens on read, in `inter
 
 ### Configuration
 
-Environment variables only.
+Environment variables, or `KEY=value` lines in `./.env` (written by the first-run wizard; a shell-set variable always wins over the file).
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PORT` | `8787` | Local listen port (proxy, dashboard and API share it) |
-| `UPSTREAM` | `https://api.anthropic.com` | Upstream base URL |
+| `UPSTREAM` | `https://api.anthropic.com` | Upstream base URL (`https://<region>-aiplatform.googleapis.com/v1` for Vertex) |
 | `TOKENTRACER_DB` | `./tokentracer.db` | SQLite path, created on first run |
 
 ### Development

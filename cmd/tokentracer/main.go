@@ -114,9 +114,15 @@ func vertexUpstream(region string) string {
 // line is derived from it, so no client name is stored.
 func runSetup() {
 	r := bufio.NewReader(os.Stdin)
+	// /dev/null passes the TTY check (it is a char device), so EOF is the real
+	// "nobody is answering" signal: default everything and persist nothing.
+	interactive := true
 	ask := func(prompt string) string {
 		fmt.Print(prompt)
-		s, _ := r.ReadString('\n')
+		s, err := r.ReadString('\n')
+		if err != nil {
+			interactive = false
+		}
 		return strings.TrimSpace(s)
 	}
 
@@ -137,10 +143,12 @@ func runSetup() {
 		up = "https://api.anthropic.com"
 	}
 
-	if err := writeEnvFile(envFile, map[string]string{"UPSTREAM": up}); err != nil {
-		fmt.Fprintf(os.Stderr, "tokentracer: could not write %s: %v\n", envFile, err)
-	} else {
-		fmt.Printf("tokentracer: saved %s — re-run `go run ./cmd/tokentracer setup` to change it\n", envFile)
+	if interactive {
+		if err := writeEnvFile(envFile, map[string]string{"UPSTREAM": up}); err != nil {
+			fmt.Fprintf(os.Stderr, "tokentracer: could not write %s: %v\n", envFile, err)
+		} else {
+			fmt.Printf("tokentracer: saved %s — re-run `go run ./cmd/tokentracer setup` to change it\n", envFile)
+		}
 	}
 	os.Setenv("UPSTREAM", up)
 }
