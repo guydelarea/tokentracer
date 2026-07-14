@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -23,17 +24,24 @@ const rowColumns = `
 	duration_ms, ttft_ms, stop_reason, op, label,
 	input_tokens, output_tokens, cache_read_tokens, cache_w5m_tokens, cache_w1h_tokens,
 	turns, tool_count, coalesce(max_tokens, 0), total_bytes, tools_bytes, system_bytes, messages_bytes,
-	err_type, err_msg`
+	err_type, err_msg,
+	coalesce(think_tokens, 0), coalesce(text_tokens, 0), coalesce(tool_tokens, 0), prefix`
 
 // Lifetime returns every row ever recorded, in the slim pricing projection,
 // oldest first. The dashboard re-prices all of it on every poll — at v1 scale
 // that is a few milliseconds, and it means the lifetime total can never drift
 // from the rows it is derived from.
+// It carries the session columns too. The sessions table aggregates over every
+// request ever recorded — a session that started this morning is still the one
+// on screen — so it folds out of this same scan rather than paying for a second
+// one. Six cheap columns on a pass that was already reading the row.
 func (s *Store) Lifetime() ([]UsageRow, error) {
 	rows, err := s.db.Query(`
 		SELECT ts_ms, model_req, coalesce(model_served, ''),
 		       coalesce(input_tokens, 0), coalesce(output_tokens, 0),
-		       coalesce(cache_read_tokens, 0), coalesce(cache_w5m_tokens, 0), coalesce(cache_w1h_tokens, 0)
+		       coalesce(cache_read_tokens, 0), coalesce(cache_w5m_tokens, 0), coalesce(cache_w1h_tokens, 0),
+		       coalesce(session_id, ''), status, coalesce(label, ''), coalesce(op, ''),
+		       coalesce(max_tokens, 0), tool_count, tools_bytes
 		FROM requests
 		ORDER BY ts_ms`)
 	if err != nil {
@@ -44,12 +52,46 @@ func (s *Store) Lifetime() ([]UsageRow, error) {
 	var out []UsageRow
 	for rows.Next() {
 		var u UsageRow
-		if err := rows.Scan(&u.TsMs, &u.ModelReq, &u.ModelServed, &u.In, &u.Out, &u.Read, &u.W5m, &u.W1h); err != nil {
+		if err := rows.Scan(&u.TsMs, &u.ModelReq, &u.ModelServed, &u.In, &u.Out, &u.Read, &u.W5m, &u.W1h,
+			&u.SessionID, &u.Status, &u.Label, &u.Op, &u.MaxTokens, &u.ToolCount, &u.ToolsBytes); err != nil {
 			return nil, fmt.Errorf("store: lifetime: %w", err)
 		}
 		out = append(out, u)
 	}
 	return out, rows.Err()
+}
+
+// Session returns every row of one session, oldest first — the grain the trace
+// folds over. Chronological because every cache event is defined against the
+// request before it: a re-written prefix is only a *break* if the one before it
+// primed the cache.
+func (s *Store) Session(sid string) ([]Row, error) {
+	rows, err := s.db.Query(
+		`SELECT`+rowColumns+` FROM requests WHERE coalesce(session_id, '') = ? ORDER BY ts_ms, id`, sid)
+	if err != nil {
+		return nil, fmt.Errorf("store: session: %w", err)
+	}
+	defer rows.Close()
+	return scanRows(rows, "session")
+}
+
+// LatestToolsCapture is the id of the newest request in a session that shipped
+// tool schemas — the capture the cut list reads the schemas themselves out of.
+// The newest, because a session's toolset is whatever it is shipping *now*: a
+// tool dropped from the request an hour ago is not one you can still cut.
+func (s *Store) LatestToolsCapture(sid string) (int64, error) {
+	var id int64
+	err := s.db.QueryRow(
+		`SELECT id FROM requests
+		 WHERE coalesce(session_id, '') = ? AND tool_count > 0
+		 ORDER BY ts_ms DESC, id DESC LIMIT 1`, sid).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNoCapture
+	}
+	if err != nil {
+		return 0, fmt.Errorf("store: latest tools capture: %w", err)
+	}
+	return id, nil
 }
 
 // Window returns the full rows recorded at or after since, oldest first. The
@@ -97,7 +139,7 @@ func scanRows(rows *sql.Rows, what string) ([]Row, error) {
 // count was never learned, which is a different fact from zero tokens.
 func scanRow(rows *sql.Rows) (Row, error) {
 	var r Row
-	var sessionID, modelServed, stopReason, op, label, errType, errMsg sql.NullString
+	var sessionID, modelServed, stopReason, op, label, errType, errMsg, prefix sql.NullString
 
 	err := rows.Scan(
 		&r.ID, &r.TsMs, &r.Endpoint, &sessionID, &r.ModelReq, &modelServed,
@@ -106,6 +148,7 @@ func scanRow(rows *sql.Rows) (Row, error) {
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheW5mTokens, &r.CacheW1hTokens,
 		&r.Turns, &r.ToolCount, &r.MaxTokens, &r.TotalBytes, &r.ToolsBytes, &r.SystemBytes, &r.MessagesBytes,
 		&errType, &errMsg,
+		&r.ThinkTokens, &r.TextTokens, &r.ToolTokens, &prefix,
 	)
 	if err != nil {
 		return Row{}, err
@@ -118,5 +161,6 @@ func scanRow(rows *sql.Rows) (Row, error) {
 	r.Label = label.String
 	r.ErrType = errType.String
 	r.ErrMsg = errMsg.String
+	r.Prefix = prefix.String
 	return r, nil
 }

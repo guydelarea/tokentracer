@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -202,10 +203,20 @@ func TestEndToEnd(t *testing.T) {
 	if stats.UnpricedReqs != 0 {
 		t.Errorf("unpricedReqs = %d — claude-sonnet-5 has no rate in the seed table", stats.UnpricedReqs)
 	}
-	if len(stats.Recent) != 1 {
-		t.Fatalf("recent = %d rows", len(stats.Recent))
+	if len(stats.Sessions) != 1 {
+		t.Fatalf("sessions = %d, want the one this exchange belongs to", len(stats.Sessions))
 	}
-	r0 := stats.Recent[0]
+	s0 := stats.Sessions[0]
+	if s0.Req != 1 || !s0.Priced || s0.Cost <= 0 {
+		t.Errorf("session row = %+v", s0)
+	}
+
+	// 5b. The request itself: one level down, inside its session's trace.
+	trace := getTrace(t, front, s0.ID)
+	if len(trace.Rows) != 1 {
+		t.Fatalf("trace rows = %d", len(trace.Rows))
+	}
+	r0 := trace.Rows[0]
 	if !r0.Priced {
 		t.Error("the recorded exchange came back unpriced")
 	}
@@ -217,6 +228,26 @@ func TestEndToEnd(t *testing.T) {
 	}
 	if r0.Bytes.Tools != 232586 {
 		t.Errorf("row byte splits missing: %+v", r0.Bytes)
+	}
+	// The reply's output tokens, apportioned across the blocks that produced them.
+	// The fixture's response thinks, speaks and calls a tool, so all three must be
+	// non-zero — and they must add up to exactly what the API billed.
+	sh := r0.Shape
+	if sh.Think == 0 || sh.Text == 0 || sh.Tool == 0 {
+		t.Errorf("output shape did not split a thinking + text + tool_use reply: %+v", sh)
+	}
+	if got := sh.Think + sh.Text + sh.Tool; got != *row.OutputTokens {
+		t.Errorf("output shape sums to %d, but the API billed %d output tokens", got, *row.OutputTokens)
+	}
+	// The toolset is read back out of the capture, and the one tool the reply
+	// actually called is not on the cut list.
+	if len(trace.Tools) != 119 {
+		t.Errorf("trace resolved %d schemas, want 119", len(trace.Tools))
+	}
+	for _, tl := range trace.Tools {
+		if tl.Name == "DesignSync" && tl.Unused {
+			t.Error("DesignSync was called by this very request and still landed on the cut list")
+		}
 	}
 
 	// 6. The inspector's breakdown comes from the capture, folded server-side.
@@ -327,34 +358,66 @@ type statsResponse struct {
 	Traced       int     `json:"traced"`
 	Cost         float64 `json:"cost"`
 	UnpricedReqs int     `json:"unpricedReqs"`
-	Recent       []struct {
+	Sessions     []struct {
+		ID     string  `json:"id"`
+		Label  string  `json:"label"`
+		Req    int     `json:"req"`
+		Cost   float64 `json:"cost"`
+		Priced bool    `json:"priced"`
+		Unused int     `json:"unused"`
+	} `json:"sessions"`
+}
+
+// traceResponse is the session screen's payload — where a request row lives now.
+type traceResponse struct {
+	Req  int `json:"req"`
+	Rows []struct {
 		ID     int64  `json:"id"`
 		Op     string `json:"op"`
 		Priced bool   `json:"priced"`
 		Cost   struct {
 			In, Read, Write, Out float64
 		} `json:"cost"`
+		Shape struct {
+			Think, Text, Tool int64
+		} `json:"shape"`
 		Bytes struct {
 			Total, Tools, System, Messages int64
 		} `json:"bytes"`
-	} `json:"recent"`
+	} `json:"rows"`
+	Tools []struct {
+		Name   string `json:"name"`
+		Unused bool   `json:"unused"`
+	} `json:"tools"`
 }
 
 func getStats(t *testing.T, front *httptest.Server) statsResponse {
 	t.Helper()
-	resp, err := http.Get(front.URL + "/api/stats")
+	var v statsResponse
+	getJSON(t, front.URL+"/api/stats", &v)
+	return v
+}
+
+func getTrace(t *testing.T, front *httptest.Server, sid string) traceResponse {
+	t.Helper()
+	var v traceResponse
+	getJSON(t, front.URL+"/api/trace?sid="+url.QueryEscape(sid), &v)
+	return v
+}
+
+func getJSON(t *testing.T, target string, into any) {
+	t.Helper()
+	resp, err := http.Get(target)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		t.Fatalf("/api/stats → %d", resp.StatusCode)
+		t.Fatalf("%s → %d", target, resp.StatusCode)
 	}
-	var v statsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(into); err != nil {
 		t.Fatal(err)
 	}
-	return v
 }
 
 type captureResponse struct {

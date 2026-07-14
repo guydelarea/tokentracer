@@ -17,14 +17,19 @@ const timelineMin = 60
 // statsView is the /api/stats contract. These json tags ARE the wire format —
 // there is no translation layer, so the two cannot drift.
 type statsView struct {
-	Port         int         `json:"port"`
-	Upstream     string      `json:"upstream"`
-	Traced       int         `json:"traced"`
-	Cost         float64     `json:"cost"`
-	UnpricedReqs int         `json:"unpricedReqs"`
-	Tokens       tokens      `json:"tokens"` // lifetime
-	Overview     overview    `json:"overview"`
-	Recent       []recentRow `json:"recent"`
+	Port         int      `json:"port"`
+	Upstream     string   `json:"upstream"`
+	Traced       int      `json:"traced"`
+	Cost         float64  `json:"cost"`
+	UnpricedReqs int      `json:"unpricedReqs"`
+	Tokens       tokens   `json:"tokens"` // lifetime
+	Overview     overview `json:"overview"`
+
+	// The front page is the sessions table. There is no flat request log here any
+	// more: a request is not a thing anyone did, and the twenty of them that made
+	// up one turn are noise until you have picked the session they belong to. The
+	// requests live one level down, inside the trace of the session that made them.
+	Sessions []sessionRow `json:"sessions"`
 }
 
 type overview struct {
@@ -40,6 +45,14 @@ type overview struct {
 	Tokens    tokens   `json:"tokens"` // the current window
 	Latency   latency  `json:"latency"`
 	Timeline  []bucket `json:"timeline"`
+
+	// What you are paying, right now, for tool schemas nothing has called — summed
+	// over the live sessions, at the cadence they are actually running at. The one
+	// number on the page that is not a measurement but a claim: this is the money
+	// you could stop spending without changing what you are doing.
+	WasteHr     float64 `json:"wasteHr"`
+	UnusedCount int     `json:"unusedCount"` // …across how many schemas
+	WorstSid    string  `json:"worstSid"`    // …and the session shipping the most of them
 
 	// ColdStart says we have been watching for less than one window, which is
 	// exactly when BurnAvg's floor (see below) pins it to BurnNow. The ratio
@@ -91,6 +104,7 @@ type recentRow struct {
 	Tok     tokens    `json:"tok"`
 	Cost    costs     `json:"cost"`
 	Priced  bool      `json:"priced"`
+	Shape   shape     `json:"shape"`
 	Bytes   byteSplit `json:"bytes"`
 	ErrType string    `json:"errType,omitempty"`
 	ErrMsg  string    `json:"errMsg,omitempty"`
@@ -118,6 +132,14 @@ type byteSplit struct {
 	Messages int64 `json:"messages"`
 }
 
+// shape is where a reply's output tokens went. An estimate — see
+// anthropic.SplitOutput — and the only one on the wire.
+type shape struct {
+	Think int64 `json:"think"`
+	Text  int64 `json:"text"`
+	Tool  int64 `json:"tool"`
+}
+
 // fold turns facts and rates into every number the dashboard shows. It is pure:
 // `now` is a parameter, so bucket boundaries are testable, and nothing here
 // reads a clock or a database.
@@ -132,12 +154,11 @@ type byteSplit struct {
 // free, cache the running totals keyed by max rowid: rows are immutable and
 // append-only, and a rate-table change only happens at restart, which resets the
 // cache anyway.
-func fold(lifetime []store.UsageRow, window, recent []store.Row, rates []billing.Rate, now time.Time, cfg Config) statsView {
+func fold(lifetime []store.UsageRow, window []store.Row, tools map[string]toolset, rates []billing.Rate, now time.Time, cfg Config) statsView {
 	v := statsView{
 		Port:     cfg.Port,
 		Upstream: cfg.Upstream,
 		Traced:   len(lifetime),
-		Recent:   make([]recentRow, 0, len(recent)),
 		Overview: overview{
 			WindowMin: windowMin,
 			Timeline:  make([]bucket, timelineMin),
@@ -246,46 +267,68 @@ func fold(lifetime []store.UsageRow, window, recent []store.Row, rates []billing
 	v.Overview.HitNow = hitRate(winRead, winIn+winRead+winWrite)
 	v.Overview.Latency = latency{P50Ttft: percentile(ttfts, 0.50), P95Ttft: percentile(ttfts, 0.95)}
 
-	// ---- the request log ----
-	for _, r := range recent {
-		at := time.UnixMilli(r.TsMs)
-		u := billing.Usage{
-			In:      deref(r.InputTokens),
-			Read:    deref(r.CacheReadTokens),
-			Write5m: deref(r.CacheW5mTokens),
-			Write1h: deref(r.CacheW1hTokens),
-			Out:     deref(r.OutputTokens),
-		}
-		model := billedModel(r.ModelReq, r.ModelServed)
-		bill := billing.Compute(rates, model, u, at)
+	// ---- the sessions table, and the waste it is shipping ----
+	v.Sessions = foldSessions(lifetime, tools, rates, now)
 
-		v.Recent = append(v.Recent, recentRow{
-			ID:      r.ID,
-			Time:    at.Format(time.RFC3339),
-			Label:   r.Label,
-			Model:   model,
-			Sid:     r.SessionID,
-			Op:      r.Op,
-			Status:  r.Status,
-			Ms:      r.DurationMs,
-			Ttft:    r.TtftMs,
-			Stop:    r.StopReason,
-			Aborted: r.Aborted,
-			Tok:     tokens{In: u.In, Read: u.Read, Write: u.Write5m + u.Write1h, Out: u.Out},
-			Cost:    costs{In: bill.In, Read: bill.Read, Write: bill.Write, Out: bill.Out},
-			Priced:  bill.Priced,
-			Bytes: byteSplit{
-				Total:    r.TotalBytes,
-				Tools:    r.ToolsBytes,
-				System:   r.SystemBytes,
-				Messages: r.MessagesBytes,
-			},
-			ErrType: r.ErrType,
-			ErrMsg:  r.ErrMsg,
-			Probe:   isProbe(r),
-		})
+	// "Could have saved" counts LIVE sessions only, and deliberately. A schema that
+	// went uncalled in a session that ended two hours ago is not money you can stop
+	// spending — it is money already gone. Advice you cannot act on, priced to the
+	// cent, is the fastest way to teach someone to ignore the number.
+	worst := int64(0)
+	for _, s := range v.Sessions {
+		if !s.Live || s.Unused == 0 {
+			continue
+		}
+		v.Overview.WasteHr += s.WasteHr
+		v.Overview.UnusedCount += s.Unused
+		if s.UnusedBytes > worst {
+			worst, v.Overview.WorstSid = s.UnusedBytes, s.ID
+		}
 	}
 	return v
+}
+
+// rowView projects one fact row into the wire row the trace's list and charts
+// draw. The trace is the only thing that carries request rows now, so this is
+// the one place a request becomes JSON.
+func rowView(r store.Row, rates []billing.Rate) recentRow {
+	at := time.UnixMilli(r.TsMs)
+	u := billing.Usage{
+		In:      deref(r.InputTokens),
+		Read:    deref(r.CacheReadTokens),
+		Write5m: deref(r.CacheW5mTokens),
+		Write1h: deref(r.CacheW1hTokens),
+		Out:     deref(r.OutputTokens),
+	}
+	model := billedModel(r.ModelReq, r.ModelServed)
+	bill := billing.Compute(rates, model, u, at)
+
+	return recentRow{
+		ID:      r.ID,
+		Time:    at.Format(time.RFC3339),
+		Label:   r.Label,
+		Model:   model,
+		Sid:     r.SessionID,
+		Op:      r.Op,
+		Status:  r.Status,
+		Ms:      r.DurationMs,
+		Ttft:    r.TtftMs,
+		Stop:    r.StopReason,
+		Aborted: r.Aborted,
+		Tok:     tokens{In: u.In, Read: u.Read, Write: u.Write5m + u.Write1h, Out: u.Out},
+		Cost:    costs{In: bill.In, Read: bill.Read, Write: bill.Write, Out: bill.Out},
+		Priced:  bill.Priced,
+		Shape:   shape{Think: r.ThinkTokens, Text: r.TextTokens, Tool: r.ToolTokens},
+		Bytes: byteSplit{
+			Total:    r.TotalBytes,
+			Tools:    r.ToolsBytes,
+			System:   r.SystemBytes,
+			Messages: r.MessagesBytes,
+		},
+		ErrType: r.ErrType,
+		ErrMsg:  r.ErrMsg,
+		Probe:   isProbe(r),
+	}
 }
 
 // isProbe reports whether a row is a client asking a question about the account
