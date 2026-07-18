@@ -450,9 +450,19 @@ func TestStatsViewJSONContract(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, k := range []string{"port", "upstream", "traced", "cost", "unpricedReqs", "tokens", "overview", "sessions"} {
+	for _, k := range []string{"port", "upstream", "traced", "cost", "unpricedReqs", "tokens", "overview", "sessions", "storage"} {
 		if _, ok := got[k]; !ok {
 			t.Errorf("/api/stats is missing the contract key %q", k)
+		}
+	}
+
+	st, ok := got["storage"].(map[string]any)
+	if !ok {
+		t.Fatal("storage is not an object")
+	}
+	for _, k := range []string{"captureBytes", "retention"} {
+		if _, ok := st[k]; !ok {
+			t.Errorf("storage is missing the contract key %q", k)
 		}
 	}
 

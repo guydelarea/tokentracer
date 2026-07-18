@@ -458,6 +458,110 @@ func TestDeleteCapturesLeavesFactRows(t *testing.T) {
 	}
 }
 
+// Retention is a capture-only policy. The fact rows are the permanent record,
+// and a sweep that touched them would be deleting the spend history to save
+// disk — which is the one thing this database must never do.
+func TestPruneCapturesLeavesFactRows(t *testing.T) {
+	s, _ := openTemp(t)
+
+	now := time.Now().UnixMilli()
+	day := int64(24 * 60 * 60 * 1000)
+	ages := []int64{now - 8*day, now - 2*day, now} // old, recent, live
+
+	var ids []int64
+	for _, ts := range ages {
+		row := sampleRow()
+		row.TsMs = ts
+		id, err := s.InsertExchange(row, []byte(`{"model":"x"}`), []byte(`{"type":"message"}`))
+		if err != nil {
+			t.Fatalf("InsertExchange: %v", err)
+		}
+		ids = append(ids, id)
+	}
+
+	n, err := s.PruneCaptures(now - 7*day)
+	if err != nil {
+		t.Fatalf("PruneCaptures: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("pruned %d captures, want 1 (only the 8-day-old one is past a 7-day window)", n)
+	}
+
+	rows, err := s.Recent(10)
+	if err != nil {
+		t.Fatalf("Recent: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Errorf("%d fact rows survive the prune, want 3", len(rows))
+	}
+
+	if _, _, err := s.Capture(ids[0]); !errors.Is(err, ErrNoCapture) {
+		t.Errorf("pruned capture: err = %v, want ErrNoCapture", err)
+	}
+	for _, id := range ids[1:] {
+		if _, _, err := s.Capture(id); err != nil {
+			t.Errorf("capture %d inside the window: %v, want it kept", id, err)
+		}
+	}
+}
+
+func TestPruneCapturesOnEmptyStore(t *testing.T) {
+	s, _ := openTemp(t)
+
+	n, err := s.PruneCaptures(time.Now().UnixMilli())
+	if err != nil {
+		t.Fatalf("PruneCaptures: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("pruned %d, want 0", n)
+	}
+}
+
+func TestCaptureBytes(t *testing.T) {
+	s, _ := openTemp(t)
+
+	if n, err := s.CaptureBytes(); err != nil || n != 0 {
+		t.Fatalf("CaptureBytes on empty store = %d, %v; want 0, nil", n, err)
+	}
+
+	if _, err := s.InsertExchange(sampleRow(), []byte(strings.Repeat("x", 4096)), nil); err != nil {
+		t.Fatalf("InsertExchange: %v", err)
+	}
+	n, err := s.CaptureBytes()
+	if err != nil {
+		t.Fatalf("CaptureBytes: %v", err)
+	}
+	// Gzipped, so it is far under the raw 4 KB — the point is that it counts the
+	// stored size and that a NULL response does not poison the sum.
+	if n <= 0 || n >= 4096 {
+		t.Errorf("CaptureBytes = %d, want the compressed size of one 4 KB body", n)
+	}
+}
+
+func TestSettingsRoundTrip(t *testing.T) {
+	s, _ := openTemp(t)
+
+	// Absent reads as empty, not as an error: the caller's default beats one.
+	if v, err := s.Setting("retention"); err != nil || v != "" {
+		t.Fatalf("Setting on a fresh store = %q, %v; want \"\", nil", v, err)
+	}
+
+	if err := s.SetSetting("retention", "7d"); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+	if v, _ := s.Setting("retention"); v != "7d" {
+		t.Errorf("Setting = %q, want %q", v, "7d")
+	}
+
+	// Writing again replaces rather than erroring on the primary key.
+	if err := s.SetSetting("retention", "off"); err != nil {
+		t.Fatalf("SetSetting overwrite: %v", err)
+	}
+	if v, _ := s.Setting("retention"); v != "off" {
+		t.Errorf("Setting after overwrite = %q, want %q", v, "off")
+	}
+}
+
 func TestCaptureUnknownID(t *testing.T) {
 	s, _ := openTemp(t)
 

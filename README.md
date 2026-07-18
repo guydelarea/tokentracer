@@ -141,7 +141,11 @@ Things worth knowing:
 ### Logs and security
 
 > [!WARNING]
-> Request bodies are captured verbatim. **Headers are never written to disk** — your API key lives in `x-api-key` and `Authorization` and never reaches the database — but any secret or customer data you send in an agent *message* does. Treat `tokentracer.db` as sensitive material. Gzip is not encryption.
+> Request bodies are captured. **Headers are never written to disk** — your API key lives in `x-api-key` and `Authorization` and never reaches the database — and known credential shapes are stripped out of the bodies (below). Everything else you send in an agent *message* is stored as sent: source, customer data, whatever the session read. Treat `tokentracer.db` as sensitive material. Gzip is not encryption.
+
+**Redaction.** Before a capture is stored, `internal/redact` replaces the things that are only ever secrets: `sk-ant-…`/`sk-…`, GitHub `ghp_…`, Google `AIza…`, Slack `xox…`, AWS key ids and `aws_secret_access_key`, JWTs, PEM private-key blocks, and named values in JSON fields, `Authorization`/`x-api-key` headers and `KEY=`/`TOKEN=`/`PASSWORD=` assignments. Each becomes `[redacted:<kind>]`, keeping the field name — that a session exported `ANTHROPIC_API_KEY` is worth knowing; what it exported is not. Responses are redacted too, since a model that echoes a pasted key back leaks it just the same.
+
+This runs on the bytes headed for the database and nothing else. The client's stream is untouched, and every fact is folded from the verbatim body first, so no byte count, token figure or cache-prefix hash moves. It is a scalpel, not an entropy filter: it will not catch a credential in a format nobody has enumerated, and it deliberately leaves hashes, ids and base64 payloads alone rather than shredding the evidence a capture exists to be.
 
 The proxy and the dashboard share one port, and the dashboard reads those captures back out. So `/dashboard`, `/api/stats` and `/api/capture` answer **404 to anything that is not this machine**, and the listener binds `127.0.0.1` besides. Two locks, because one is not enough for a file that holds every prompt you have ever sent.
 
@@ -154,7 +158,11 @@ Captures are the expensive part, and they are bigger than you would guess. Measu
 - **~100 KB gzipped per request**, dominated by the tool schemas resent on every turn.
 - 10 requests ≈ 1 MB. A heavy day of a few thousand requests is **hundreds of MB**.
 
-Retention is manual in v1. Deleting captures never touches the facts — the sessions table, every trace, all costs, and the cache diagnosis survive, because the prefix hashes and the output split live on the request row, not in the blob. Only what can be read *nowhere else* goes: the itemized schemas, the cut list, and the per-request drill-down, which degrade to the byte splits already on the row:
+So the dashboard header carries the control: **keep captures forever / 24 hours / 7 days / 30 days**, plus a **purge** that drops all of them now. The window is stored in the database, applied the moment you set it, and re-applied hourly and at startup. It defaults to *forever* — retention deletes evidence, so it only runs because you asked. A sweep that deletes anything vacuums after itself, or the file would never actually shrink.
+
+Deleting captures never touches the facts — the sessions table, every trace, all costs, and the cache diagnosis survive, because the prefix hashes and the output split live on the request row, not in the blob. Only what can be read *nowhere else* goes: the itemized schemas, the cut list, and the per-request drill-down, which degrade to the byte splits already on the row.
+
+The equivalent by hand, if you prefer:
 
 ```bash
 sqlite3 tokentracer.db 'delete from captures'   # reclaim the space
@@ -221,7 +229,7 @@ One vendor per package, one file per vendor. A second one (`internal/openai/`) f
 Issues and pull requests are welcome. The most valuable contributions are:
 
 - OpenAI Chat Completions and Responses parsing, for Codex, Cursor and OpenCode.
-- Request-body secret redaction.
+- Credential shapes the redactor does not know yet (`internal/redact`), with a test case each.
 - Updates to the rate table as models and pricing change.
 
 Before opening a pull request:
@@ -234,11 +242,11 @@ Keep changes focused. Add a real test for non-trivial behavior — and prefer on
 
 ### Roadmap
 
+- [x] Sessions and Trace views
+- [x] **Improve**: ranked money-leak recommendations — unused tool schemas, exploration re-reads, cache breaks, compaction candidates
+- [x] Request-body secret redaction
+- [x] Capture auto-pruning
 - [ ] OpenAI-compatible request parsing (Codex, Cursor, OpenCode)
-- [ ] Sessions and Trace views
-- [ ] **Improve**: ranked money-leak recommendations — unused tool schemas, exploration re-reads, cache breaks, compaction candidates
-- [ ] Request-body secret redaction
-- [ ] Capture auto-pruning
 
 ### License
 

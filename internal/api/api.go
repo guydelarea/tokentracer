@@ -59,6 +59,8 @@ func Handler(st *store.Store, cfg Config) http.Handler {
 	mux.HandleFunc("GET /api/stats", s.stats)
 	mux.HandleFunc("GET /api/trace", s.trace)
 	mux.HandleFunc("GET /api/capture", s.capture)
+	mux.HandleFunc("POST /api/settings", s.settings)
+	mux.HandleFunc("POST /api/purge", s.purge)
 	mux.Handle("GET /web/", http.StripPrefix("/web/", http.FileServer(http.FS(web.FS))))
 	return loopbackOnly(mux)
 }
@@ -105,8 +107,11 @@ func (s *server) stats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	view := fold(lifetime, window, s.toolsets(lifetime), s.rates, now, s.cfg)
+	view.Storage = s.storageOf()
+
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(fold(lifetime, window, s.toolsets(lifetime), s.rates, now, s.cfg)); err != nil {
+	if err := json.NewEncoder(w).Encode(view); err != nil {
 		log.Printf("tokentracer: encoding stats: %v", err)
 	}
 }

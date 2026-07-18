@@ -176,6 +176,37 @@ type app struct {
 	handler  http.Handler
 	store    *store.Store
 	recorder *record.Recorder
+
+	stopSweep chan struct{} // closed to end the retention sweeper
+	sweepDone chan struct{} // closed when it has ended
+}
+
+// sweepEvery is how often the capture retention window is enforced. Hourly:
+// the windows on offer are a day and up, so nothing finer would delete anything
+// sooner, and the setting is swept the moment it changes anyway.
+const sweepEvery = time.Hour
+
+// sweepLoop enforces retention — once at startup, so a window set last session
+// applies before the dashboard is even open, then on the tick. It does nothing
+// at all unless someone chose a window; the default is off.
+func (a *app) sweepLoop(every time.Duration) {
+	defer close(a.sweepDone)
+
+	t := time.NewTicker(every)
+	defer t.Stop()
+
+	for {
+		if n, err := api.Sweep(a.store, time.Now()); err != nil {
+			log.Printf("tokentracer: capture sweep: %v", err)
+		} else if n > 0 {
+			log.Printf("tokentracer: capture sweep pruned %d captures", n)
+		}
+		select {
+		case <-a.stopSweep:
+			return
+		case <-t.C:
+		}
+	}
 }
 
 func newApp(cfg config) (*app, error) {
@@ -202,13 +233,27 @@ func newApp(cfg config) (*app, error) {
 	mux.Handle("/api/", dash)
 	mux.Handle("/web/", dash)
 
-	return &app{handler: mux, store: st, recorder: rec}, nil
+	a := &app{
+		handler:   mux,
+		store:     st,
+		recorder:  rec,
+		stopSweep: make(chan struct{}),
+		sweepDone: make(chan struct{}),
+	}
+	go a.sweepLoop(sweepEvery)
+	return a, nil
 }
 
 // close runs the shutdown order that guarantees nothing recorded is lost:
 // the server stops first (so no new exchanges arrive), then the recorder drains
 // what it already has, and only then does the database close under it.
 func (a *app) close() {
+	// The sweeper goes first and is waited for: it holds the database's single
+	// connection while it vacuums, and closing the store out from under that
+	// would turn a clean shutdown into a logged error for no reason.
+	close(a.stopSweep)
+	<-a.sweepDone
+
 	a.recorder.Close()
 	a.store.Close()
 }

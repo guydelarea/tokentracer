@@ -194,6 +194,15 @@ CREATE TABLE captures (
 	 ALTER TABLE requests ADD COLUMN text_tokens INTEGER;
 	 ALTER TABLE requests ADD COLUMN tool_tokens INTEGER;
 	 ALTER TABLE requests ADD COLUMN prefix TEXT;`,
+
+	// 4 — settings. One key/value table for the handful of choices the dashboard
+	// is allowed to make persistent, so a capture retention window survives a
+	// restart. Not config: config is env, set before the process starts and read
+	// once. This is state the running process changes about itself.
+	`CREATE TABLE settings (
+	  key   TEXT PRIMARY KEY,
+	  value TEXT NOT NULL
+	);`,
 }
 
 // Open opens (creating if needed) the database at path, applies the pragmas
@@ -396,6 +405,82 @@ func (s *Store) Capture(id int64) (reqJSON, respJSON []byte, err error) {
 		}
 	}
 	return reqJSON, respJSON, nil
+}
+
+// Setting reads a persisted dashboard setting. A key that was never set reads
+// back as "" with no error: absent and empty are the same answer here, and the
+// caller's default is a better one than an error it would have to translate.
+func (s *Store) Setting(key string) (string, error) {
+	var v string
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: read setting %q: %w", key, err)
+	}
+	return v, nil
+}
+
+// SetSetting writes a dashboard setting, replacing any previous value.
+func (s *Store) SetSetting(key, value string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO settings(key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	if err != nil {
+		return fmt.Errorf("store: write setting %q: %w", key, err)
+	}
+	return nil
+}
+
+// PruneCaptures deletes the captures of every request older than beforeMs and
+// returns how many went. It touches `captures` only: the fact rows are the
+// permanent record and no retention window ever applies to them, which is the
+// whole reason the two tables are separate.
+//
+// A prune that deleted something is followed by a VACUUM, because a DELETE
+// alone only marks pages reusable — the file stays exactly as large as it was,
+// and a retention setting that does not give back disk is a lie.
+//
+// ponytail: VACUUM rewrites the file and holds the single connection while it
+// does, so a sweep on a multi-gigabyte database stalls the recorder for the
+// duration. That stall is absorbed: the recorder's queue is 256 deep and it is
+// fed after the client's stream has already finished, so nobody waiting on a
+// response feels it. If databases get big enough for that to stop being true,
+// the upgrade is auto_vacuum=INCREMENTAL at creation plus a bounded
+// `PRAGMA incremental_vacuum(N)` per sweep.
+func (s *Store) PruneCaptures(beforeMs int64) (int64, error) {
+	res, err := s.db.Exec(
+		`DELETE FROM captures WHERE request_id IN (SELECT id FROM requests WHERE ts_ms < ?)`, beforeMs)
+	if err != nil {
+		return 0, fmt.Errorf("store: prune captures: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: prune captures: %w", err)
+	}
+	if n > 0 {
+		if _, err := s.db.Exec(`VACUUM`); err != nil {
+			// The captures are gone, which is what was asked for. Not reclaiming the
+			// pages is worth a line in the log, not an error the caller must handle.
+			return n, fmt.Errorf("store: vacuum after prune: %w", err)
+		}
+	}
+	return n, nil
+}
+
+// CaptureBytes is the compressed size of every stored capture — what the
+// retention setting is actually trading away, shown next to the control that
+// sets it.
+func (s *Store) CaptureBytes() (int64, error) {
+	var n int64
+	err := s.db.QueryRow(
+		`SELECT coalesce(sum(length(request_gz) + coalesce(length(response_gz), 0)), 0) FROM captures`,
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: capture bytes: %w", err)
+	}
+	return n, nil
 }
 
 func gz(b []byte) ([]byte, error) {
