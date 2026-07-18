@@ -37,6 +37,133 @@ func get(t *testing.T, h http.Handler, target, remoteAddr string) *httptest.Resp
 	return rec
 }
 
+func post(t *testing.T, h http.Handler, target, remoteAddr string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", target, nil)
+	req.RemoteAddr = remoteAddr
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// seedCapture writes one fact row plus capture, aged by d into the past.
+func seedCapture(t *testing.T, st *store.Store, d time.Duration) int64 {
+	t.Helper()
+	id, err := st.InsertExchange(store.Row{
+		TsMs:     time.Now().Add(-d).UnixMilli(),
+		Endpoint: "POST /v1/messages",
+		ModelReq: "claude-sonnet-5",
+		Status:   200,
+	}, []byte(`{"model":"claude-sonnet-5"}`), []byte(`{"type":"message"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// Setting a window is not a promise about the next hour — it deletes what has
+// already aged out, immediately, or the control looks broken.
+func TestSettingsPrunesOnChange(t *testing.T) {
+	h, st, _ := newServer(t)
+
+	old := seedCapture(t, st, 8*24*time.Hour)
+	fresh := seedCapture(t, st, time.Hour)
+
+	if code := post(t, h, "/api/settings?retention=7d", "127.0.0.1:1234").Code; code != http.StatusNoContent {
+		t.Fatalf("POST /api/settings?retention=7d → %d, want 204", code)
+	}
+
+	if _, _, err := st.Capture(old); err == nil {
+		t.Error("the 8-day-old capture survived a 7-day window")
+	}
+	if _, _, err := st.Capture(fresh); err != nil {
+		t.Errorf("the 1-hour-old capture was pruned by a 7-day window: %v", err)
+	}
+
+	// Facts are never a retention concern.
+	rows, err := st.Recent(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Errorf("%d fact rows survive the prune, want 2", len(rows))
+	}
+
+	// And the choice comes back on the poll the page already makes.
+	var v statsView
+	if err := json.Unmarshal(get(t, h, "/api/stats", "127.0.0.1:1234").Body.Bytes(), &v); err != nil {
+		t.Fatal(err)
+	}
+	if v.Storage.Retention != "7d" {
+		t.Errorf("stats retention = %q, want %q", v.Storage.Retention, "7d")
+	}
+	if v.Storage.CaptureBytes <= 0 {
+		t.Errorf("stats captureBytes = %d, want the size of the surviving capture", v.Storage.CaptureBytes)
+	}
+}
+
+// A window we cannot interpret must never be read as permission to delete.
+func TestSettingsRejectsUnknownWindow(t *testing.T) {
+	h, st, _ := newServer(t)
+	id := seedCapture(t, st, 400*24*time.Hour) // ancient: any real window would take it
+
+	for _, q := range []string{"retention=forever", "retention=", "retention=1s", ""} {
+		if code := post(t, h, "/api/settings?"+q, "127.0.0.1:1234").Code; code != http.StatusBadRequest {
+			t.Errorf("POST /api/settings?%s → %d, want 400", q, code)
+		}
+	}
+	if _, _, err := st.Capture(id); err != nil {
+		t.Errorf("a rejected setting still pruned: %v", err)
+	}
+
+	var v statsView
+	if err := json.Unmarshal(get(t, h, "/api/stats", "127.0.0.1:1234").Body.Bytes(), &v); err != nil {
+		t.Fatal(err)
+	}
+	if v.Storage.Retention != "off" {
+		t.Errorf("retention = %q after rejected writes, want %q", v.Storage.Retention, "off")
+	}
+}
+
+func TestPurgeDropsEveryCaptureAndKeepsFacts(t *testing.T) {
+	h, st, _ := newServer(t)
+
+	ids := []int64{seedCapture(t, st, 30*24*time.Hour), seedCapture(t, st, time.Minute), seedCapture(t, st, 0)}
+
+	if code := post(t, h, "/api/purge", "127.0.0.1:1234").Code; code != http.StatusNoContent {
+		t.Fatalf("POST /api/purge → %d, want 204", code)
+	}
+
+	for _, id := range ids {
+		if _, _, err := st.Capture(id); err == nil {
+			t.Errorf("capture %d survived a purge", id)
+		}
+	}
+	rows, err := st.Recent(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != len(ids) {
+		t.Errorf("%d fact rows survive a purge, want %d", len(rows), len(ids))
+	}
+}
+
+// The write routes delete data, so the loopback rule matters more on them than
+// anywhere else.
+func TestWriteRoutesAreLoopbackOnly(t *testing.T) {
+	h, st, _ := newServer(t)
+	id := seedCapture(t, st, 30*24*time.Hour)
+
+	for _, target := range []string{"/api/settings?retention=24h", "/api/purge"} {
+		if code := post(t, h, target, "8.8.8.8:443").Code; code != http.StatusNotFound {
+			t.Errorf("POST %s from off-machine → %d, want 404", target, code)
+		}
+	}
+	if _, _, err := st.Capture(id); err != nil {
+		t.Errorf("an off-machine request deleted a capture: %v", err)
+	}
+}
+
 // The dashboard holds full request captures — including everything the user
 // ever sent to the model. It answers to this machine and nobody else.
 func TestLoopbackOnly(t *testing.T) {

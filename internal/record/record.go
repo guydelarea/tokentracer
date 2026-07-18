@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/guydelarea/tokentracer/internal/anthropic"
+	"github.com/guydelarea/tokentracer/internal/redact"
 	"github.com/guydelarea/tokentracer/internal/store"
 )
 
@@ -104,7 +105,11 @@ func (r *Recorder) handle(ex Exchange) {
 	}()
 
 	row, respJSON := build(ex)
-	r.insert(row, ex.ReqBody, respJSON)
+
+	// Redaction runs here and nowhere earlier: build() has already folded every
+	// fact out of the verbatim bytes, so no byte count, prefix hash or token
+	// figure can move. What goes to disk is the stripped copy.
+	r.insert(row, redact.Bytes(ex.ReqBody), redact.Bytes(respJSON))
 }
 
 // err_type precedence: the upstream's own error outranks anything we concluded,
@@ -149,6 +154,14 @@ func build(ex Exchange) (store.Row, []byte) {
 
 	buildRequest(&row, ex, &best)
 	respJSON := buildResponse(&row, ex, &best)
+
+	// The three columns that carry body text rather than measure it. They are
+	// facts, so they outlive the capture, so they cannot be left to the capture's
+	// redaction: the label is the first 64 characters the user typed, Op is the
+	// head of a tool call's input, and an error message quotes what it choked on.
+	row.Label = redact.String(row.Label)
+	row.Op = redact.String(row.Op)
+	row.ErrMsg = redact.String(row.ErrMsg)
 	return row, respJSON
 }
 

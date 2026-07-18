@@ -30,6 +30,19 @@ type statsView struct {
 	// up one turn are noise until you have picked the session they belong to. The
 	// requests live one level down, inside the trace of the session that made them.
 	Sessions []sessionRow `json:"sessions"`
+
+	// Storage is not folded from the rows — it is the state of the capture table
+	// and the retention setting governing it, filled in by the handler. It rides
+	// on /api/stats because the page already polls it, and a second endpoint for
+	// two integers would be a second poll.
+	Storage storage `json:"storage"`
+}
+
+// storage is what the captures cost and the window that bounds them: the two
+// halves of the retention control.
+type storage struct {
+	CaptureBytes int64  `json:"captureBytes"`
+	Retention    string `json:"retention"` // off | 24h | 7d | 30d
 }
 
 type overview struct {

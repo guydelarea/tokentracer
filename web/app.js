@@ -171,6 +171,13 @@
  * @property {tokens} tokens    lifetime
  * @property {overview} overview
  * @property {sessionRow[]} sessions
+ * @property {storage} storage
+ */
+
+/** What the captures cost on disk, and the window that bounds them.
+ * @typedef {object} storage
+ * @property {number} captureBytes
+ * @property {string} retention    off | 24h | 7d | 30d
  */
 
 /** What one request's cache did, and what it cost.
@@ -1598,6 +1605,12 @@ function poll() {
     var u = $('#unp'), n = j.unpricedReqs || 0;
     u.textContent = n + (n === 1 ? ' unpriced request' : ' unpriced requests');
     u.style.display = n > 0 ? 'inline-block' : 'none';
+    var store = j.storage || { captureBytes: 0, retention: 'off' };
+    $('#capsz').textContent = fK(store.captureBytes) + ' captures';
+    // Never while they are choosing: a 2s poll that reassigns the select mid-open
+    // snaps it back under the cursor.
+    var ret = /** @type {HTMLSelectElement} */ ($('#ret'));
+    if (document.activeElement !== ret) ret.value = store.retention || 'off';
     if (S.sid) pollTrace(S.sid); else render();
   }).catch(function () { /* the server is restarting; the next poll picks it up */ });
 }
@@ -1620,6 +1633,19 @@ function openTrace(sid) {
   render();      // the shell, with its loading note
   pollTrace(sid);
 }
+
+/* ---------- retention ----------
+   The only two controls on this page that delete anything. Both write and then
+   re-poll rather than patching D by hand: the server decides what actually went,
+   and the next frame shows it. */
+$('#ret').onchange = function () {
+  var v = /** @type {HTMLSelectElement} */ ($('#ret')).value;
+  fetch('/api/settings?retention=' + encodeURIComponent(v), { method: 'POST' }).then(poll).catch(function () { });
+};
+$('#purge').onclick = function () {
+  if (!window.confirm('Delete every stored capture?\n\nThe request and response bodies go, so the inspector loses its detail. Every number on this page stays: they are folded from the fact rows, which are never deleted.')) return;
+  fetch('/api/purge', { method: 'POST' }).then(poll).catch(function () { });
+};
 
 TIP = $('#tip');
 $('#scrim').onclick = closeInsp;

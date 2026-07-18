@@ -44,6 +44,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,'Helvetic
 .hdrs .live{display:flex;align-items:center;gap:7px}
 .hdrs .live .dot{background:#ffffff;animation:ttPulse 2.6s ease-in-out infinite}
 
+/* Capture retention. Header furniture, not a call to action: it reads as the
+   status line it sits in until you go looking for it. */
+.keep{display:flex;align-items:center;gap:8px}
+.keep label{color:#4e4e4e}
+.keep select,.keep button{font-family:inherit;font-size:11px;color:#8a8a8a;background:transparent;border:1px solid rgba(255,255,255,0.12);padding:2px 5px;cursor:pointer}
+.keep select:hover,.keep button:hover{color:#ededed;border-color:rgba(255,255,255,0.28)}
+.keep select option{background:#0a0a0a;color:#ededed}
+/* The one destructive control on the page, so it says so on approach. */
+.keep button:hover{color:#ff5a5a;border-color:rgba(255,90,90,0.45)}
+
 /* An unpriced row has no rate for its model. It must never render as $0.00 —
    that is the exact footgun this project exists to fix. */
 .badge{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;padding:2px 6px;white-space:nowrap}

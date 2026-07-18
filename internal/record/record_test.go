@@ -174,6 +174,73 @@ func TestRecordHappyPath(t *testing.T) {
 	}
 }
 
+// Redaction has to hold both halves at once: nothing secret reaches the disk,
+// and every fact still describes the bytes that were actually on the wire. The
+// byte columns are the sharp end of that — they are measured before redaction
+// shortens the body, so a capture that got smaller must not move them.
+func TestRecordRedactsCaptureWithoutMovingFacts(t *testing.T) {
+	const key = "sk-ant-api03-xY9kLm2nQ7rT4vW8zA1bC3dE5fG6hJ"
+
+	r, st := newRecorder(t)
+	req := []byte(`{"model":"claude-sonnet-5","max_tokens":1024,"messages":[{"role":"user","content":"run export ANTHROPIC_API_KEY=` + key + ` then deploy"}]}`)
+	resp := []byte(`{"type":"message","model":"claude-sonnet-5","stop_reason":"end_turn",` +
+		`"content":[{"type":"text","text":"I set ANTHROPIC_API_KEY=` + key + ` for you"}],` +
+		`"usage":{"input_tokens":10,"output_tokens":5}}`)
+
+	r.Record(Exchange{
+		Start:    time.Now(),
+		TTFT:     10 * time.Millisecond,
+		Duration: 90 * time.Millisecond,
+		Method:   "POST",
+		Path:     "/v1/messages",
+		Status:   200,
+		ReqBody:  req,
+		RespBody: resp,
+	})
+
+	rows := rowsOf(t, r, st)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	row := rows[0]
+
+	// Facts: measured against the verbatim body, so unchanged by redaction.
+	if row.TotalBytes != int64(len(req)) {
+		t.Errorf("TotalBytes = %d, want %d — the fact must describe the wire, not the stored copy", row.TotalBytes, len(req))
+	}
+	if deref(row.InputTokens) != 10 || deref(row.OutputTokens) != 5 {
+		t.Errorf("usage facts moved: in = %d, out = %d", deref(row.InputTokens), deref(row.OutputTokens))
+	}
+
+	// The label is a fact that carries body text, and it outlives the capture.
+	if strings.Contains(row.Label, key) {
+		t.Errorf("Label kept the key: %q", row.Label)
+	}
+	if !strings.Contains(row.Label, "run export ANTHROPIC_API_KEY=") {
+		t.Errorf("Label lost its context: %q", row.Label)
+	}
+
+	// Both sides of the capture: a model echoing a pasted key back is the same
+	// leak as the paste.
+	reqJSON, respJSON, err := st.Capture(row.ID)
+	if err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	if bytes.Contains(reqJSON, []byte(key)) {
+		t.Error("request capture still holds the key")
+	}
+	if bytes.Contains(respJSON, []byte(key)) {
+		t.Error("response capture still holds the key")
+	}
+	if !bytes.Contains(reqJSON, []byte("[redacted:anthropic-key]")) {
+		t.Errorf("request capture has no redaction marker: %s", reqJSON)
+	}
+	// Redacted, not gutted: the capture is still the request it was.
+	if !bytes.Contains(reqJSON, []byte(`"model":"claude-sonnet-5"`)) {
+		t.Errorf("redaction damaged the capture: %s", reqJSON)
+	}
+}
+
 // A Vertex exchange: the model rides in the URL, the body names none, and the
 // reply is one plain JSON message rather than a stream.
 func TestRecordVertexExchange(t *testing.T) {

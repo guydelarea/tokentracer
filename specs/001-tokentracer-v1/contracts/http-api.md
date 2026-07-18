@@ -75,6 +75,17 @@ There is no flat request log here. A request is not a thing anyone did — a ses
 }
 ```
 
+The one field not folded from the rows — the state of the capture table and the window bounding it. It rides here because the page already polls this endpoint:
+
+```jsonc
+{
+  "storage": {
+    "captureBytes": 44040192,    // Σ gzipped capture size
+    "retention": "7d"            // off | 24h | 7d | 30d
+  }
+}
+```
+
 A request whose client never named a session buckets under the display id `(no session id)`. It is a label, not an id: the rows carry `""`, and the trace endpoint maps it back.
 
 ### GET /api/trace?sid=SID
@@ -155,7 +166,18 @@ Gunzips the capture row for request N:
 - Section byte sums equal the fact row's `tools_bytes`/`system_bytes`/`messages_bytes` (tested invariant).
 - Capture row deleted → 404; the inspector's context tab falls back to the fact-row stacked bar, and the trace's schema/cut-list panels say so via `captureGone`. Everything folded from the fact rows survives.
 
+Captures are redacted before they are stored (`internal/redact`): vendor key shapes, private-key blocks, JWTs, and named credential values in JSON, headers and env assignments come back as `[redacted:<kind>]`. The facts are folded from the verbatim bytes first, so no byte count, prefix hash or token figure is affected — the capture is the only thing that changes.
+
+### POST /api/settings?retention=off|24h|7d|30d
+
+Sets the capture retention window and sweeps immediately. `204` on success, `400` on any other value — a window we cannot interpret is never read as permission to delete. The default is `off`; a background sweep re-applies the stored window hourly and once at startup.
+
+### POST /api/purge
+
+Deletes every capture now, regardless of the window. `204`. Fact rows are untouched: this reclaims disk, it does not erase history.
+
 ## Error responses
 
-- Non-loopback client on dashboard/API routes: `404`.
+- Non-loopback client on dashboard/API routes: `404`. This includes the two write routes, which delete data.
 - `/api/capture` with unknown/deleted id: `404`.
+- `/api/settings` with an unknown retention window: `400`.
