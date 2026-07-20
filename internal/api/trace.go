@@ -185,9 +185,32 @@ type traceView struct {
 
 	Insights []insight `json:"insights"`
 
+	// The subagents this session spawned, one summary each. Their rows are NOT
+	// mixed into Rows/Cache above — each agent is its own conversation with its
+	// own cache story, and interleaving them would invent breaks that never
+	// happened. Their money is reported alongside instead: the Spent the page
+	// shows is Cost + AgentCost, which is what the sessions table shows too.
+	Agents    []agentRow `json:"agents"`
+	AgentCost float64    `json:"agentCost"`
+	AgentReq  int        `json:"agentReq"`
+
 	// The latest capture was deleted, so the schemas and the tool-result rows
 	// cannot be read. Everything derived from the fact rows still stands.
 	CaptureGone bool `json:"captureGone"`
+}
+
+// agentRow is one subagent session, summarized for the trace's drill-down list.
+type agentRow struct {
+	Sid    string  `json:"sid"`
+	Label  string  `json:"label"`
+	Model  string  `json:"model"`
+	Req    int     `json:"req"`
+	Err    int     `json:"err"`
+	Cost   float64 `json:"cost"`
+	Priced bool    `json:"priced"`
+	Tok    tokens  `json:"tok"`
+	Live   bool    `json:"live"`
+	Last   string  `json:"last"`
 }
 
 // What kind of work each tool does — and, for exploreTools, whose output lands
@@ -469,6 +492,72 @@ func foldTrace(sid string, rows []store.Row, ts toolset, results []anthropic.Res
 
 	t.Insights = insightsOf(t, readPerTok, cadence)
 	return t
+}
+
+// foldAgents summarizes the subagent sessions a parent spawned, first-spawned
+// first. rows is every child row in one chronological pass (see AgentRows);
+// grouping by the child's own session id happens here. Pricing is per row, at
+// the row's own timestamp — the same rule as everywhere else, for the same
+// reason: a group total that disagreed with the rest of the page would
+// discredit both.
+func foldAgents(rows []store.Row, rates []billing.Rate, now time.Time) []agentRow {
+	agg := map[string]*agentRow{}
+	last := map[string]time.Time{}
+	var order []string
+
+	for _, r := range rows {
+		sid := r.SessionID
+		if sid == "" {
+			continue
+		}
+		a := agg[sid]
+		if a == nil {
+			a = &agentRow{Sid: sid}
+			agg[sid] = a
+			order = append(order, sid)
+		}
+		at := time.UnixMilli(r.TsMs)
+		last[sid] = at
+		if a.Label == "" && !isProbe(r) {
+			a.Label = r.Label
+		}
+		a.Model = billedModel(r.ModelReq, r.ModelServed)
+		a.Req++
+		if r.Status >= 400 {
+			if !benignErr(r) {
+				a.Err++
+			}
+			continue
+		}
+		u := billing.Usage{
+			In:      deref(r.InputTokens),
+			Read:    deref(r.CacheReadTokens),
+			Write5m: deref(r.CacheW5mTokens),
+			Write1h: deref(r.CacheW1hTokens),
+			Out:     deref(r.OutputTokens),
+		}
+		bill := billing.Compute(rates, a.Model, u, at)
+		if bill.Priced {
+			a.Cost += bill.Total
+			a.Priced = true
+		}
+		a.Tok.In += u.In
+		a.Tok.Read += u.Read
+		a.Tok.Write += u.Write5m + u.Write1h
+		a.Tok.Out += u.Out
+	}
+
+	out := make([]agentRow, 0, len(order))
+	for _, sid := range order {
+		a := agg[sid]
+		if a.Label == "" {
+			a.Label = "(no prompt captured)"
+		}
+		a.Live = now.Sub(last[sid]) < liveWindow
+		a.Last = last[sid].Format(time.RFC3339)
+		out = append(out, *a)
+	}
+	return out
 }
 
 // prefixOf decodes a row's stored prefix chain. A row from before the column

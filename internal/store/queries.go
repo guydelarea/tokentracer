@@ -25,7 +25,7 @@ const rowColumns = `
 	input_tokens, output_tokens, cache_read_tokens, cache_w5m_tokens, cache_w1h_tokens,
 	turns, tool_count, coalesce(max_tokens, 0), total_bytes, tools_bytes, system_bytes, messages_bytes,
 	err_type, err_msg,
-	coalesce(think_tokens, 0), coalesce(text_tokens, 0), coalesce(tool_tokens, 0), prefix`
+	coalesce(think_tokens, 0), coalesce(text_tokens, 0), coalesce(tool_tokens, 0), prefix, parent_sid`
 
 // Lifetime returns every row ever recorded, in the slim pricing projection,
 // oldest first. The dashboard re-prices all of it on every poll — at v1 scale
@@ -40,7 +40,7 @@ func (s *Store) Lifetime() ([]UsageRow, error) {
 		SELECT ts_ms, model_req, coalesce(model_served, ''),
 		       coalesce(input_tokens, 0), coalesce(output_tokens, 0),
 		       coalesce(cache_read_tokens, 0), coalesce(cache_w5m_tokens, 0), coalesce(cache_w1h_tokens, 0),
-		       coalesce(session_id, ''), status, coalesce(label, ''), coalesce(op, ''),
+		       coalesce(session_id, ''), coalesce(parent_sid, ''), status, coalesce(label, ''), coalesce(op, ''),
 		       coalesce(max_tokens, 0), tool_count, tools_bytes
 		FROM requests
 		ORDER BY ts_ms`)
@@ -53,7 +53,7 @@ func (s *Store) Lifetime() ([]UsageRow, error) {
 	for rows.Next() {
 		var u UsageRow
 		if err := rows.Scan(&u.TsMs, &u.ModelReq, &u.ModelServed, &u.In, &u.Out, &u.Read, &u.W5m, &u.W1h,
-			&u.SessionID, &u.Status, &u.Label, &u.Op, &u.MaxTokens, &u.ToolCount, &u.ToolsBytes); err != nil {
+			&u.SessionID, &u.ParentSid, &u.Status, &u.Label, &u.Op, &u.MaxTokens, &u.ToolCount, &u.ToolsBytes); err != nil {
 			return nil, fmt.Errorf("store: lifetime: %w", err)
 		}
 		out = append(out, u)
@@ -73,6 +73,19 @@ func (s *Store) Session(sid string) ([]Row, error) {
 	}
 	defer rows.Close()
 	return scanRows(rows, "session")
+}
+
+// AgentRows returns every row of every subagent session a parent spawned,
+// oldest first. Grouping the rows by their own session_id is the caller's job —
+// one query serves however many agents the session ran.
+func (s *Store) AgentRows(parentSid string) ([]Row, error) {
+	rows, err := s.db.Query(
+		`SELECT`+rowColumns+` FROM requests WHERE parent_sid = ? ORDER BY ts_ms, id`, parentSid)
+	if err != nil {
+		return nil, fmt.Errorf("store: agent rows: %w", err)
+	}
+	defer rows.Close()
+	return scanRows(rows, "agent rows")
 }
 
 // LatestToolsCapture is the id of the newest request in a session that shipped
@@ -139,7 +152,7 @@ func scanRows(rows *sql.Rows, what string) ([]Row, error) {
 // count was never learned, which is a different fact from zero tokens.
 func scanRow(rows *sql.Rows) (Row, error) {
 	var r Row
-	var sessionID, modelServed, stopReason, op, label, errType, errMsg, prefix sql.NullString
+	var sessionID, modelServed, stopReason, op, label, errType, errMsg, prefix, parentSid sql.NullString
 
 	err := rows.Scan(
 		&r.ID, &r.TsMs, &r.Endpoint, &sessionID, &r.ModelReq, &modelServed,
@@ -148,7 +161,7 @@ func scanRow(rows *sql.Rows) (Row, error) {
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheW5mTokens, &r.CacheW1hTokens,
 		&r.Turns, &r.ToolCount, &r.MaxTokens, &r.TotalBytes, &r.ToolsBytes, &r.SystemBytes, &r.MessagesBytes,
 		&errType, &errMsg,
-		&r.ThinkTokens, &r.TextTokens, &r.ToolTokens, &prefix,
+		&r.ThinkTokens, &r.TextTokens, &r.ToolTokens, &prefix, &parentSid,
 	)
 	if err != nil {
 		return Row{}, err
@@ -162,5 +175,6 @@ func scanRow(rows *sql.Rows) (Row, error) {
 	r.ErrType = errType.String
 	r.ErrMsg = errMsg.String
 	r.Prefix = prefix.String
+	r.ParentSid = parentSid.String
 	return r, nil
 }

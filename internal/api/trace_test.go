@@ -21,6 +21,42 @@ func tr(id int64, ageMin int, in, read, write, out int64, prefix []string) store
 	return r
 }
 
+// foldAgents summarizes each subagent session out of one chronological pass of
+// child rows: one entry per agent, first-spawned first, priced row by row.
+func TestFoldAgents(t *testing.T) {
+	a1 := tr(1, 9, 1000, 0, 0, 100, nil)
+	a1.SessionID = "agent-1"
+	a1.Label = "scan the repo"
+	a2 := tr(2, 8, 500, 0, 0, 50, nil)
+	a2.SessionID = "agent-2"
+	a2.Label = "audit the proxy"
+	a3 := tr(3, 7, 1000, 0, 0, 100, nil)
+	a3.SessionID = "agent-1"
+	fail := tr(4, 6, 0, 0, 0, 0, nil)
+	fail.SessionID = "agent-2"
+	fail.Status = 500
+
+	got := foldAgents([]store.Row{a1, a2, a3, fail}, testRates, now)
+	if len(got) != 2 {
+		t.Fatalf("agents = %d, want 2", len(got))
+	}
+	if got[0].Sid != "agent-1" || got[1].Sid != "agent-2" {
+		t.Errorf("order = %q, %q — want first-spawned first", got[0].Sid, got[1].Sid)
+	}
+	if got[0].Req != 2 || got[0].Err != 0 || got[0].Label != "scan the repo" {
+		t.Errorf("agent-1 = %+v", got[0])
+	}
+	if got[1].Req != 2 || got[1].Err != 1 {
+		t.Errorf("agent-2 req/err = %d/%d, want 2/1", got[1].Req, got[1].Err)
+	}
+	if !got[0].Priced || got[0].Cost <= 0 {
+		t.Errorf("agent-1 cost = %v priced=%v, want a real figure", got[0].Cost, got[0].Priced)
+	}
+	if got[0].Tok.In != 2000 || got[0].Tok.Out != 200 {
+		t.Errorf("agent-1 tok = %+v", got[0].Tok)
+	}
+}
+
 // The claim the trace exists to make: this request broke the cache, and THIS is
 // what broke it. The prefix chain is cumulative over tools → system → messages,
 // so the first index at which two requests diverge is not a hint about the cause

@@ -80,6 +80,11 @@ type sessionRow struct {
 	Priced        bool  `json:"priced"`
 	Stateless     bool  `json:"stateless"`
 	ContextWindow int64 `json:"contextWindow"`
+
+	// Agents is how many subagent sessions were folded into this row. A subagent
+	// is not a thing anyone did either — it is part of the session that spawned
+	// it, so its spend lands here rather than on a row of its own.
+	Agents int `json:"agents"`
 }
 
 // toolset is a session's tool schemas, as of its latest request that shipped
@@ -100,6 +105,8 @@ type sessionAgg struct {
 	called           map[string]bool // tools this session actually invoked
 	winCost          float64         // spend inside the overview window
 	winReqs          int
+	parent           string // the session that spawned this one, "" for top-level
+	agents           int    // subagent sessions folded into this row
 }
 
 // foldSessions folds the lifetime scan into the sessions table, newest activity
@@ -130,6 +137,9 @@ func foldSessions(lifetime []store.UsageRow, tools map[string]toolset, rates []b
 		// page is called "quota" and the table names nothing at all.
 		if a.label == "" && !probeUsage(u) {
 			a.label = u.Label
+		}
+		if a.parent == "" && u.ParentSid != "" {
+			a.parent = u.ParentSid
 		}
 		a.last = at
 		a.req++
@@ -164,9 +174,51 @@ func foldSessions(lifetime []store.UsageRow, tools map[string]toolset, rates []b
 		}
 	}
 
+	// ---- fold subagents into the session that spawned them ----
+	// A subagent's work is part of its parent's work: its money, tokens and
+	// requests land on the parent row, and its own row disappears. What does NOT
+	// merge is the toolset accounting — the parent's schemas ship on the parent's
+	// requests, at the parent's cadence, so called/winReqs stay per-session.
+	// rootOf follows the parent link to the top; the hop cap is cycle insurance,
+	// not an expectation (a subagent cannot spawn subagents).
+	rootOf := func(sid string) string {
+		for hops := 0; hops < 4; hops++ {
+			a := agg[sid]
+			if a == nil || a.parent == "" || a.parent == sid || agg[a.parent] == nil {
+				return sid
+			}
+			sid = a.parent
+		}
+		return sid
+	}
+	for _, sid := range order {
+		root := rootOf(sid)
+		if root == sid {
+			continue
+		}
+		p, c := agg[root], agg[sid]
+		p.agents++
+		p.req += c.req
+		p.err += c.err
+		p.cost += c.cost
+		p.priced = p.priced || c.priced
+		p.tok.In += c.tok.In
+		p.tok.Read += c.tok.Read
+		p.tok.Write += c.tok.Write
+		p.tok.Out += c.tok.Out
+		p.winCost += c.winCost
+		// A session with a subagent still running is a session still working.
+		if c.last.After(p.last) {
+			p.last = c.last
+		}
+	}
+
 	perHour := 60.0 / windowMin
 	out := make([]sessionRow, 0, len(order))
 	for _, sid := range order {
+		if rootOf(sid) != sid {
+			continue // folded into its parent above
+		}
 		a := agg[sid]
 
 		label := a.label
@@ -185,6 +237,7 @@ func foldSessions(lifetime []store.UsageRow, tools map[string]toolset, rates []b
 			Hit:           hitRate(a.tok.Read, a.tok.In+a.tok.Read+a.tok.Write),
 			Stateless:     a.req-a.err >= statelessMinReqs && a.tok.Read == 0,
 			ContextWindow: billing.ContextWindow(a.model),
+			Agents:        a.agents,
 		}
 
 		// The cut list, priced. A never-called schema costs its tokens at the

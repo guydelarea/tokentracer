@@ -42,6 +42,12 @@ type RequestFacts struct {
 	MessagesBytes int // Σ per-message raw bytes
 
 	Label string // first user-role text, ≤64 chars
+
+	// FirstText is the same first user text, whole. Never stored: it exists so
+	// the recorder can match a new session's opening message against the Task
+	// prompts it has seen leave in tool_use blocks — which is the only thread on
+	// the wire tying a subagent's session to the session that spawned it.
+	FirstText string
 }
 
 // request is the shape we read. Sections stay raw: we measure and itemize them,
@@ -126,7 +132,8 @@ func ParseRequest(body []byte) (RequestFacts, error) {
 	for _, m := range req.Messages {
 		f.MessagesBytes += len(m)
 	}
-	f.Label = label(req.Messages)
+	f.FirstText = firstText(req.Messages)
+	f.Label = truncate(f.FirstText, labelMax)
 	return f, nil
 }
 
@@ -146,7 +153,8 @@ func systemBlocks(raw json.RawMessage) []json.RawMessage {
 	return []json.RawMessage{raw}
 }
 
-// label is the first thing the *user* actually said, ≤64 chars.
+// firstText is the first thing the *user* actually said, whole. The label is
+// its first 64 chars.
 //
 // Two things pretend to be the user and are not. Claude Code injects
 // system-reminders as whole messages with role "system" mid-conversation, and
@@ -154,14 +162,14 @@ func systemBlocks(raw json.RawMessage) []json.RawMessage {
 // first user message opens with a 13.7 KB reminder and the human's actual words
 // ("hello world!") are the second block. Both are skipped, or every row in the
 // dashboard would be labelled "<system-reminder>".
-func label(msgs []json.RawMessage) string {
+func firstText(msgs []json.RawMessage) string {
 	for _, raw := range msgs {
 		var m message
 		if err := json.Unmarshal(raw, &m); err != nil || m.Role != "user" {
 			continue
 		}
 		if txt := firstUserText(m.Content); txt != "" {
-			return truncate(txt, labelMax)
+			return txt
 		}
 	}
 	return ""
@@ -394,6 +402,33 @@ func (r Response) Op() string {
 		return op
 	}
 	return r.StopReason
+}
+
+// agentTools are the tool names a client uses to spawn a subagent. Claude Code
+// has called it Task and Agent across versions; both take the subagent's whole
+// opening message as a string field named "prompt".
+var agentTools = map[string]bool{"Task": true, "Agent": true}
+
+// AgentPrompts returns the prompt of every subagent this reply spawned.
+//
+// A subagent runs as its own API session with nothing on the wire naming its
+// parent — the ONLY thread between the two is that the child's first user
+// message is the prompt the parent's tool_use block carried. The recorder holds
+// these prompts just long enough to recognize the child when it arrives.
+func AgentPrompts(content []Block) []string {
+	var out []string
+	for _, b := range content {
+		if b.Type != "tool_use" || !agentTools[b.Name] || len(b.Input) == 0 {
+			continue
+		}
+		var in struct {
+			Prompt string `json:"prompt"`
+		}
+		if json.Unmarshal(b.Input, &in) == nil && in.Prompt != "" {
+			out = append(out, in.Prompt)
+		}
+	}
+	return out
 }
 
 func commandOf(input json.RawMessage) string {

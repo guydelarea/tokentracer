@@ -54,6 +54,7 @@ func sampleRow() Row {
 		MessagesBytes:   45459,
 		ErrType:         "oversize",
 		ErrMsg:          "response: tee buffer full",
+		ParentSid:       "0f0e0d0c-parent-session",
 	}
 }
 
@@ -211,6 +212,7 @@ func assertRowEqual(t *testing.T, got, want Row) {
 		{"MessagesBytes", got.MessagesBytes, want.MessagesBytes},
 		{"ErrType", got.ErrType, want.ErrType},
 		{"ErrMsg", got.ErrMsg, want.ErrMsg},
+		{"ParentSid", got.ParentSid, want.ParentSid},
 	} {
 		if f.got != f.want {
 			t.Errorf("%s = %v, want %v", f.name, f.got, f.want)
@@ -242,6 +244,47 @@ func ptrStr(p *int64) string {
 		return "nil"
 	}
 	return strconv.FormatInt(*p, 10)
+}
+
+// AgentRows returns every subagent row a parent spawned, in one chronological
+// pass — and nothing else: not the parent's own rows, not another session's.
+func TestAgentRows(t *testing.T) {
+	s, _ := openTemp(t)
+
+	mk := func(sid, parent string, ts int64) Row {
+		r := sampleRow()
+		r.SessionID = sid
+		r.ParentSid = parent
+		r.TsMs = ts
+		return r
+	}
+	for _, r := range []Row{
+		mk("parent", "", 100),
+		mk("agent-2", "parent", 400),
+		mk("agent-1", "parent", 200),
+		mk("agent-1", "parent", 300),
+		mk("stranger", "someone-else", 250),
+	} {
+		if _, err := s.InsertExchange(r, nil, nil); err != nil {
+			t.Fatalf("InsertExchange: %v", err)
+		}
+	}
+
+	rows, err := s.AgentRows("parent")
+	if err != nil {
+		t.Fatalf("AgentRows: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("AgentRows returned %d rows, want 3", len(rows))
+	}
+	for i, want := range []struct {
+		sid string
+		ts  int64
+	}{{"agent-1", 200}, {"agent-1", 300}, {"agent-2", 400}} {
+		if rows[i].SessionID != want.sid || rows[i].TsMs != want.ts {
+			t.Errorf("rows[%d] = %s@%d, want %s@%d", i, rows[i].SessionID, rows[i].TsMs, want.sid, want.ts)
+		}
+	}
 }
 
 // A nil usage column must read back nil, not 0: "we never learned the token

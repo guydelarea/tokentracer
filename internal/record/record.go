@@ -58,6 +58,7 @@ type Recorder struct {
 	queue chan Exchange
 	done  chan struct{}
 	once  sync.Once
+	links *linker // worker-only: ties subagent sessions to their parent
 }
 
 // New starts the worker. It borrows the store: main owns the handle, and the
@@ -67,6 +68,7 @@ func New(st *store.Store) *Recorder {
 		st:    st,
 		queue: make(chan Exchange, queueSize),
 		done:  make(chan struct{}),
+		links: newLinker(),
 	}
 	go r.work()
 	return r
@@ -104,7 +106,11 @@ func (r *Recorder) handle(ex Exchange) {
 		}
 	}()
 
-	row, respJSON := build(ex)
+	row, respJSON, li := build(ex)
+
+	// The parent link is resolved here, on the worker, because it is stateful:
+	// it needs the spawn prompts of every exchange recorded before this one.
+	r.links.apply(&row, li)
 
 	// Redaction runs here and nowhere earlier: build() has already folded every
 	// fact out of the verbatim bytes, so no byte count, prefix hash or token
@@ -131,10 +137,11 @@ func setErr(row *store.Row, rank int, typ, msg string, best *int) {
 	*best, row.ErrType, row.ErrMsg = rank, typ, msg
 }
 
-// build turns an Exchange into a row plus the response blob to keep. Both sides
-// degrade independently: a request body we can't parse never costs us the usage
-// facts from a response we could.
-func build(ex Exchange) (store.Row, []byte) {
+// build turns an Exchange into a row plus the response blob to keep, and the
+// linkInfo the parent-link pass runs on. Both sides degrade independently: a
+// request body we can't parse never costs us the usage facts from a response we
+// could.
+func build(ex Exchange) (store.Row, []byte, linkInfo) {
 	row := store.Row{
 		TsMs:       ex.Start.UnixMilli(),
 		Endpoint:   ex.Method + " " + ex.Path,
@@ -147,13 +154,14 @@ func build(ex Exchange) (store.Row, []byte) {
 		TotalBytes: int64(len(ex.ReqBody)),
 	}
 	best := 0
+	var li linkInfo
 
 	if ex.RespTruncated {
 		setErr(&row, rungOversize, "oversize", fmt.Sprintf("response: exceeded the capture cap; kept the first %d bytes", len(ex.RespBody)), &best)
 	}
 
-	buildRequest(&row, ex, &best)
-	respJSON := buildResponse(&row, ex, &best)
+	buildRequest(&row, ex, &best, &li)
+	respJSON := buildResponse(&row, ex, &best, &li)
 
 	// The three columns that carry body text rather than measure it. They are
 	// facts, so they outlive the capture, so they cannot be left to the capture's
@@ -162,10 +170,10 @@ func build(ex Exchange) (store.Row, []byte) {
 	row.Label = redact.String(row.Label)
 	row.Op = redact.String(row.Op)
 	row.ErrMsg = redact.String(row.ErrMsg)
-	return row, respJSON
+	return row, respJSON, li
 }
 
-func buildRequest(row *store.Row, ex Exchange, best *int) {
+func buildRequest(row *store.Row, ex Exchange, best *int, li *linkInfo) {
 	defer func() {
 		if p := recover(); p != nil {
 			setErr(row, rungPanic, "panic", fmt.Sprintf("request: panic: %v", p), best)
@@ -187,6 +195,7 @@ func buildRequest(row *store.Row, ex Exchange, best *int) {
 	}
 	row.SessionID = facts.SessionID
 	row.Label = facts.Label
+	li.firstText = facts.FirstText
 	row.Turns = int64(facts.Turns)
 	row.ToolCount = int64(facts.ToolCount)
 	row.MaxTokens = int64(facts.MaxTokens)
@@ -212,7 +221,7 @@ func buildRequest(row *store.Row, ex Exchange, best *int) {
 // buildResponse fills the usage facts and returns the blob to store. On every
 // failure path it returns the raw bytes instead: the capture is what lets us
 // find out what went wrong.
-func buildResponse(row *store.Row, ex Exchange, best *int) (respJSON []byte) {
+func buildResponse(row *store.Row, ex Exchange, best *int, li *linkInfo) (respJSON []byte) {
 	respJSON = ex.RespBody // the fallback on every rung below
 
 	defer func() {
@@ -243,6 +252,7 @@ func buildResponse(row *store.Row, ex Exchange, best *int) (respJSON []byte) {
 	row.ModelServed = resp.Model
 	row.StopReason = resp.StopReason
 	row.Op = resp.Op()
+	li.spawned = anthropic.AgentPrompts(resp.Content)
 	row.InputTokens = ptr(resp.Usage.In)
 	row.OutputTokens = ptr(resp.Usage.Out)
 	row.CacheReadTokens = ptr(resp.Usage.CacheRead)

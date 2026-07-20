@@ -61,7 +61,8 @@ func TestParseRequestFixture(t *testing.T) {
 
 		// Not "<system-reminder>…": the human's actual words, which sit in the
 		// SECOND text block of the first user message.
-		Label: "hello world!",
+		Label:     "hello world!",
+		FirstText: "hello world!",
 	}
 	if got != want {
 		t.Errorf("ParseRequest facts mismatch\n got: %+v\nwant: %+v", got, want)
@@ -492,6 +493,29 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta"
 			t.Error("DecodeSSE(garbage) = nil error, want an error")
 		}
 	})
+}
+
+// AgentPrompts is the parent half of the subagent link: the prompts a reply's
+// Task/Agent tool_use blocks carried, and nothing else — a Bash command or an
+// MCP tool that happens to take a "prompt" argument must not register a spawn.
+func TestAgentPrompts(t *testing.T) {
+	blocks := []Block{
+		{Type: "tool_use", Name: "Task", Input: json.RawMessage(`{"subagent_type":"Explore","prompt":"find the flaky tests"}`)},
+		{Type: "tool_use", Name: "Agent", Input: json.RawMessage(`{"prompt":"audit the proxy"}`)},
+		{Type: "tool_use", Name: "Bash", Input: json.RawMessage(`{"command":"git status"}`)},
+		{Type: "tool_use", Name: "mcp__gen__run", Input: json.RawMessage(`{"prompt":"not a spawn"}`)},
+		{Type: "tool_use", Name: "Task", Input: json.RawMessage(`{"description":"promptless"}`)},
+		{Type: "text", Text: "done"},
+	}
+	got := AgentPrompts(blocks)
+	want := []string{"find the flaky tests", "audit the proxy"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("AgentPrompts = %q, want %q", got, want)
+	}
+
+	if p := AgentPrompts(nil); p != nil {
+		t.Errorf("AgentPrompts(nil) = %q, want none", p)
+	}
 }
 
 func TestDecodeJSON(t *testing.T) {

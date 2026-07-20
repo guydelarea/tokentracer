@@ -49,6 +49,79 @@ func TestSessionLabelIsNeverTheQuotaProbe(t *testing.T) {
 	}
 }
 
+// A subagent session is not a thing anyone did — it is part of the session
+// that spawned it. Its money, tokens and requests fold into the parent's row,
+// and its own row disappears; that is what makes the table readable as "one
+// row per piece of work" instead of one per agent.
+func TestSubagentSessionsFoldIntoParent(t *testing.T) {
+	parent := su("big", 9, 1000, 0, 0, 100)
+	parent.Label = "port the design"
+
+	kid1 := su("agent-1", 8, 2000, 0, 0, 200)
+	kid1.ParentSid = "big"
+	kid1.Label = "scan the repo"
+	kid2 := su("agent-1", 7, 2000, 0, 0, 200)
+	kid2.ParentSid = "big"
+
+	other := su("solo", 6, 500, 0, 0, 50)
+	other.Label = "unrelated work"
+
+	v := foldSessions([]store.UsageRow{parent, kid1, kid2, other}, nil, testRates, now)
+
+	if len(v) != 2 {
+		t.Fatalf("sessions = %d, want 2 — the agent must not get a row", len(v))
+	}
+	var big *sessionRow
+	for i := range v {
+		if v[i].ID == "big" {
+			big = &v[i]
+		}
+		if v[i].ID == "agent-1" {
+			t.Error("the subagent kept its own row")
+		}
+	}
+	if big == nil {
+		t.Fatal("no row for the parent session")
+	}
+	if big.Agents != 1 {
+		t.Errorf("Agents = %d, want 1", big.Agents)
+	}
+	if big.Req != 3 {
+		t.Errorf("Req = %d, want 3 — the agent's requests are the session's requests", big.Req)
+	}
+	if big.Tok.In != 5000 || big.Tok.Out != 500 {
+		t.Errorf("Tok = %+v, want the group total", big.Tok)
+	}
+	if big.Label != "port the design" {
+		t.Errorf("Label = %q — the parent names the row, not the agent", big.Label)
+	}
+
+	// The group's spend is the parent's plus the agent's, each row priced at its
+	// own timestamp — same rule as everywhere else on the page.
+	var lone float64
+	for _, s := range v {
+		if s.ID == "solo" {
+			lone = s.Cost
+		}
+	}
+	if big.Cost <= lone {
+		t.Errorf("parent Cost = %v, want it to carry the agent's spend too", big.Cost)
+	}
+}
+
+// A child whose parent never recorded a row cannot merge into it: it stands
+// alone rather than vanishing into a row that does not exist.
+func TestOrphanedSubagentKeepsItsRow(t *testing.T) {
+	kid := su("agent-1", 5, 1000, 0, 0, 100)
+	kid.ParentSid = "gone"
+	kid.Label = "orphaned"
+
+	v := foldSessions([]store.UsageRow{kid}, nil, testRates, now)
+	if len(v) != 1 || v[0].ID != "agent-1" {
+		t.Fatalf("sessions = %+v, want the orphan's own row", v)
+	}
+}
+
 // A schema that ships on every request and is never called is the cut list, and
 // the number next to it is what it costs to keep shipping it.
 func TestSessionCutList(t *testing.T) {

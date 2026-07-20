@@ -89,6 +89,12 @@ type Row struct {
 	// wants an answer asks for one token.
 	MaxTokens int64
 
+	// ParentSid is the session that spawned this one, when this row belongs to a
+	// subagent the recorder managed to link back (see record's linker). "" for
+	// every top-level row, and for a subagent the link was never made for — the
+	// safe failure is an extra row on the dashboard, never a wrong merge.
+	ParentSid string // "" → NULL
+
 	TotalBytes    int64
 	ToolsBytes    int64
 	SystemBytes   int64
@@ -124,6 +130,7 @@ type UsageRow struct {
 	// of its schemas it never used; MaxTokens and ToolCount tell a probe from a
 	// failure; ToolsBytes keys the toolset cache that reads the schemas themselves.
 	SessionID  string
+	ParentSid  string // the session that spawned this one; "" for top-level rows
 	Status     int
 	Label      string
 	Op         string
@@ -203,6 +210,13 @@ CREATE TABLE captures (
 	  key   TEXT PRIMARY KEY,
 	  value TEXT NOT NULL
 	);`,
+
+	// 5 — parent_sid: the session that spawned this row's session, when the row
+	// belongs to a subagent the recorder linked back to its parent. It is what
+	// lets the dashboard show one row per conversation instead of one per agent.
+	// NULL on every pre-existing row and on every top-level session.
+	`ALTER TABLE requests ADD COLUMN parent_sid TEXT;
+	 CREATE INDEX idx_requests_parent ON requests(parent_sid);`,
 }
 
 // Open opens (creating if needed) the database at path, applies the pragmas
@@ -311,8 +325,8 @@ INSERT INTO requests (
 	input_tokens, output_tokens, cache_read_tokens, cache_w5m_tokens, cache_w1h_tokens,
 	turns, tool_count, max_tokens, total_bytes, tools_bytes, system_bytes, messages_bytes,
 	err_type, err_msg,
-	think_tokens, text_tokens, tool_tokens, prefix
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	think_tokens, text_tokens, tool_tokens, prefix, parent_sid
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // InsertExchange writes the fact row and, when there is a body worth keeping,
 // the capture — in one transaction. There is never a capture without facts.
@@ -338,7 +352,7 @@ func (s *Store) InsertExchange(r Row, reqBody, respBody []byte) (int64, error) {
 		r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheW5mTokens, r.CacheW1hTokens,
 		r.Turns, r.ToolCount, nullInt(r.MaxTokens), r.TotalBytes, r.ToolsBytes, r.SystemBytes, r.MessagesBytes,
 		nullStr(r.ErrType), nullStr(r.ErrMsg),
-		r.ThinkTokens, r.TextTokens, r.ToolTokens, nullStr(r.Prefix),
+		r.ThinkTokens, r.TextTokens, r.ToolTokens, nullStr(r.Prefix), nullStr(r.ParentSid),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("store: insert request: %w", err)
