@@ -139,6 +139,7 @@
  * @property {boolean} priced
  * @property {boolean} stateless
  * @property {number} contextWindow
+ * @property {number} agents        subagent sessions folded into this row
  */
 
 /**
@@ -235,6 +236,21 @@
  * @property {number} n
  */
 
+/** One subagent session a trace's session spawned — its own conversation, its
+ * own cache story, summarized here and traceable by clicking through.
+ * @typedef {object} agentRow
+ * @property {string} sid
+ * @property {string} label
+ * @property {string} model
+ * @property {number} req
+ * @property {number} err
+ * @property {number} cost
+ * @property {boolean} priced
+ * @property {tokens} tok
+ * @property {boolean} live
+ * @property {string} last
+ */
+
 /**
  * @typedef {object} traceView
  * @property {string} sid
@@ -273,6 +289,9 @@
  * @property {number} exploreCalls
  * @property {boolean} stateless
  * @property {insight[]} insights
+ * @property {agentRow[]} agents    subagents this session spawned; their rows are not mixed into rows/cache
+ * @property {number} agentCost
+ * @property {number} agentReq
  * @property {boolean} captureGone
  */
 
@@ -330,14 +349,18 @@ var D = {
   port: 0, upstream: '', traced: 0, cost: 0, unpricedReqs: 0,
   tokens: { in: 0, read: 0, write: 0, out: 0 },
   overview: zeroOverview(),
-  sessions: []
+  sessions: [],
+  storage: { captureBytes: 0, retention: 'off' }
 };
 /** @type {traceView|null} */
 var T = null;
 
 /** The whole of the page's state: which screen, which session, which request.
- * @type {{sid: string|null, id: number|null, tab: string, toolsAll: boolean, cutAll: boolean}} */
-var S = { sid: null, id: null, tab: 'request', toolsAll: false, cutAll: false };
+ * `open` is the inspector's expand/collapse state — one keyed map rather than a
+ * flag per thing, because the set of expandable things is data-driven. It is
+ * reset whenever a new request is opened.
+ * @type {{sid: string|null, id: number|null, tab: string, toolsAll: boolean, cutAll: boolean, open: Record<string, boolean|undefined>, rawSide: string}} */
+var S = { sid: null, id: null, tab: 'request', toolsAll: false, cutAll: false, open: {}, rawSide: 'request' };
 
 var PV = /** @type {Record<string, number|undefined>} */ ({}), PVT = /** @type {Record<string, number|undefined>} */ ({});
 /** @type {captureView|null} */
@@ -641,10 +664,17 @@ function sessionRowHtml(s) {
     ? '<span title="' + esc(s.unused + ' schemas never called') + '">' + fK(s.unusedBytes) + '</span>'
     : '—';
 
+  /* Subagent sessions are folded into this row; the chip is the only trace of
+     them here — the drill-down lives in the session's trace. */
+  var agents = s.agents > 0
+    ? '<span class="agn">+' + s.agents + (s.agents === 1 ? ' agent' : ' agents') + '</span>'
+    : '';
+
   return '<div class="sgrid srow" data-sid="' + esc(s.id) + '">' +
     '<span class="state"><span class="dot" style="background:' + dotC + ';animation:' + dotA + '"></span>' +
     '<span class="tx" style="color:' + stC + '">' + stTx + '</span></span>' +
-    '<span class="slabel" style="color:' + (s.live ? '#ececec' : '#a8a8a8') + '" title="' + esc(s.label) + '">' + esc(s.label) + '</span>' +
+    '<span style="display:flex;align-items:center;gap:8px;min-width:0">' +
+    '<span class="slabel" style="color:' + (s.live ? '#ececec' : '#a8a8a8') + '" title="' + esc(s.label) + '">' + esc(s.label) + '</span>' + agents + '</span>' +
     mix(t.read || 0, t.in || 0, t.write || 0, t.out || 0) +
     '<span class="snum" style="color:#cfcfcf">' + (s.hit * 100).toFixed(0) + '%</span>' +
     '<span class="snum" style="color:#ececec">' + rate + '</span>' +
@@ -673,6 +703,7 @@ function renderTrace() {
     '<span style="color:' + (t.live ? MRD : '#6f6f6f') + '">' + (t.live ? 'live' : 'idle ' + esc(t.idle)) + '</span></div>';
 
   h += traceStats(t);
+  h += agentsPanel(t);
   h += insightCards(t);
   h += contextChart(t);
 
@@ -688,7 +719,16 @@ function renderTrace() {
 function traceStats(t) {
   var tk = t.tok, tokIn = (tk.in || 0) + (tk.read || 0) + (tk.write || 0);
   var ctxPct = t.contextWindow > 0 ? Math.round((t.ctx / t.contextWindow) * 100) : 0;
-  var spent = t.priced ? fM(t.cost, 2) : '<span class="badge unp">unpriced</span>';
+  var nAgents = (t.agents || []).length;
+
+  /* Spent is the whole session's money — this conversation plus the subagents
+     it spawned — because that is what the sessions table shows, and the two
+     figures disagreeing would discredit both. The split is right under it. */
+  var groupCost = (t.cost || 0) + (t.agentCost || 0);
+  var spent = t.priced ? fM(groupCost, 2) : '<span class="badge unp">unpriced</span>';
+  if (nAgents > 0 && t.priced) {
+    spent += ' <span class="sub">· ' + fM(t.agentCost || 0, 2) + ' in ' + nAgents + (nAgents === 1 ? ' agent' : ' agents') + '</span>';
+  }
 
   /** @type {[string, string, boolean][]} caption, value, lead */
   var cells = [
@@ -707,6 +747,36 @@ function traceStats(t) {
   for (i = 0; i < cells.length; i++) {
     h += '<div><div class="cap">' + esc(cells[i][0]) + '</div>' +
       '<div class="v' + (cells[i][2] ? ' lead' : '') + '">' + cells[i][1] + '</div></div>';
+  }
+  return h + '</div>';
+}
+
+/* The subagents this session spawned. Each is its own conversation with its own
+   cache story, so its requests are NOT mixed into the trace below — it gets a
+   summary row here, and a click opens its own trace. */
+/** @param {traceView} t @returns {string} */
+function agentsPanel(t) {
+  var A = t.agents || [], i;
+  if (!A.length) return '';
+
+  var h = '<div style="margin-top:38px"><div class="hdrline">' +
+    '<div class="cap">Subagents <span class="sub">· spawned by this session · click one to trace it</span></div>' +
+    '<div class="note">' + A.length + (A.length === 1 ? ' agent' : ' agents') + ' · ' +
+    (t.agentReq || 0) + ' requests · ' + fM(t.agentCost || 0, 2) + '</div></div>';
+
+  for (i = 0; i < A.length; i++) {
+    var a = A[i];
+    var tk = a.tok || { in: 0, read: 0, write: 0, out: 0 };
+    var tot = (tk.in || 0) + (tk.read || 0) + (tk.write || 0) + (tk.out || 0);
+    var cost = a.priced ? fUsd(a.cost) : '<span class="badge unp">unpriced</span>';
+    h += '<div class="agrow" data-sid="' + esc(a.sid) + '">' +
+      '<span class="state"><span class="dot" style="background:' + (a.live ? MRD : '#4f4f4f') +
+      ';animation:' + (a.live ? 'ttPulse 2.6s ease-in-out infinite' : 'none') + '"></span></span>' +
+      '<span class="slabel" style="font-size:12.5px;color:#c9c9c9" title="' + esc(a.label) + '">' + esc(a.label) + '</span>' +
+      '<span class="m ell" style="font-size:10.5px;color:#7a7a7a">' + esc(shortModel(a.model)) + '</span>' +
+      '<span class="snum" style="color:#9f9f9f">' + a.req + (a.err > 0 ? '<span style="color:' + MER + '"> · ' + a.err + '</span>' : '') + '</span>' +
+      '<span class="snum" style="color:#9f9f9f">' + fT(tot) + '</span>' +
+      '<span class="snum" style="color:#ececec">' + cost + '</span></div>';
   }
   return h + '</div>';
 }
@@ -1191,7 +1261,7 @@ function miniCharts(t) {
 function openInsp(id) {
   var q = rowOf(id);
   if (!q) return;
-  S.id = id; CAP = null;
+  S.id = id; CAP = null; S.open = {}; S.rawSide = 'request';
   $('#scrim').style.display = 'block';
   var el = $('#insp');
   el.style.display = 'block';
@@ -1367,15 +1437,54 @@ function flagChips(f) {
 }
 
 /* ---------- request / response / raw ---------- */
+/** @param {*} v @returns {boolean} */
+function isArr(v) { return Object.prototype.toString.call(v) === '[object Array]'; }
 /** @param {*} v @returns {string} */
 function inspText(v) {
   if (typeof v === 'string') return v;
-  if (Object.prototype.toString.call(v) === '[object Array]') {
+  if (isArr(v)) {
     var out = [], i;
     for (i = 0; i < v.length; i++) out.push(typeof v[i] === 'string' ? v[i] : (v[i] && v[i].text) || JSON.stringify(v[i]));
     return out.join('\n');
   }
   return v == null ? '' : JSON.stringify(v, null, 2);
+}
+
+/* foldPre renders long text collapsed to its head, with an expander that shows
+   how much is hidden. The inspector's bodies are tens of KB — a wall of every
+   one of them at once is what made the tabs unreviewable. */
+/** @param {string} key @param {string} txt @param {number} cap @returns {string} */
+function foldPre(key, txt, cap) {
+  txt = String(txt == null ? '' : txt);
+  if (!txt) return '';
+  var open = !!S.open[key];
+  if (txt.length <= cap) return '<pre>' + esc(txt) + '</pre>';
+  return '<pre' + (open ? ' style="max-height:520px"' : '') + '>' + esc(open ? txt : txt.slice(0, cap) + ' …') + '</pre>' +
+    '<div class="more" data-x="' + esc(key) + '">' + (open ? '▴ collapse' : '▸ expand · ' + fK(txt.length) + ' of text') + '</div>';
+}
+
+/* msgDetail is one captured message, unfolded: every block named, sized and
+   shown whole — the breakdown the preview line can only gesture at. */
+/** @param {*} m @param {string} key @returns {string} */
+function msgDetail(m, key) {
+  var c = m.content;
+  if (typeof c === 'string') return foldPre(key + 'b', c, 900);
+  if (!isArr(c)) return foldPre(key + 'b', JSON.stringify(c, null, 2), 900);
+  var h = '', i;
+  for (i = 0; i < c.length; i++) {
+    var b = c[i] || {};
+    var head = b.type || 'block', body = '', color = '#8a8a8a';
+    if (b.type === 'text') { body = b.text || ''; }
+    else if (b.type === 'thinking') { body = b.thinking || ''; color = MTH; }
+    else if (b.type === 'tool_use') { head += ' · ' + (b.name || ''); body = JSON.stringify(b.input || {}, null, 2); color = MIN; }
+    else if (b.type === 'tool_result') { body = inspText(b.content); }
+    else if (b.type === 'image') { body = ''; }
+    else { body = JSON.stringify(b, null, 2); }
+    h += '<div class="blk"><div class="bh"><span style="color:' + color + '">' + esc(head) + '</span>' +
+      '<span class="m">' + fK(JSON.stringify(b).length) + '</span></div>' +
+      foldPre(key + 'b' + i, body, 900) + '</div>';
+  }
+  return h;
 }
 /** @param {*} m one message of the captured request @returns {string} */
 function msgPreview(m) {
@@ -1391,19 +1500,6 @@ function msgPreview(m) {
     else parts.push(String(b.text || '').replace(/\s+/g, ' '));
   }
   return parts.join(' · ');
-}
-/** @param {*} resp @returns {string} */
-function respText(resp) {
-  if (!resp) return '';
-  var out = [], i, bl = resp.content || [];
-  for (i = 0; i < bl.length; i++) {
-    var b = bl[i] || {};
-    if (b.type === 'tool_use') out.push('tool_use · ' + b.name + ' — ' + JSON.stringify(b.input || {}, null, 2));
-    else if (b.type === 'thinking') out.push('thinking — ' + (b.thinking || ''));
-    else out.push(b.type + ' — ' + (b.text || ''));
-  }
-  if (resp.stop_reason) out.push('stop_reason: ' + resp.stop_reason);
-  return out.join('\n\n');
 }
 /** @param {reqRow} q @returns {string} */
 function gone(q) {
@@ -1427,18 +1523,23 @@ function requestTab(q, j) {
   }
   var h = '<div class="hdrline" style="margin-top:24px"><div class="cap">System prompt</div>' +
     '<div class="note">' + fK(q.bytes.system) + '</div></div>' +
-    '<pre>' + esc(inspText(sys)) + '</pre>';
+    (sys ? foldPre('sys', inspText(sys), 500) : '<div class="note" style="padding:12px 0">no system prompt</div>');
+
   h += '<div class="hdrline" style="margin-top:26px"><div class="cap">Message history</div>' +
-    '<div class="note">' + msgs.length + ' messages · ' + fK(q.bytes.messages) + '</div></div><div style="margin-top:8px">';
-  var skip = Math.max(0, msgs.length - 14);
-  if (skip) h += '<div class="histrow"><span class="m" style="font-size:10.5px;color:#5f5f5f">·</span>' +
-    '<span class="m ell" style="font-size:11.5px;color:#a8a8a8">… ' + skip + ' earlier turns held in context</span><span></span></div>';
+    '<div class="note">' + msgs.length + ' messages · ' + fK(q.bytes.messages) + ' · click a row to unfold it</div></div><div style="margin-top:8px">';
+
+  /* Every turn is reachable, but the tail is what you usually came for — the
+     earlier ones sit one click behind their count. */
+  var skip = S.open['hist'] ? 0 : Math.max(0, msgs.length - 14);
+  if (skip) h += '<div class="histrow" data-x="hist" style="cursor:pointer"><span class="m" style="font-size:10.5px;color:#5f5f5f">·</span>' +
+    '<span class="m ell" style="font-size:11.5px;color:#8a8a8a">▸ show ' + skip + ' earlier turns held in context</span><span></span></div>';
   for (i = skip; i < msgs.length; i++) {
-    var m = msgs[i] || {};
-    h += '<div class="histrow">' +
-      '<span class="m" style="font-size:10.5px;color:' + (m.role === 'user' ? '#9a9a9a' : '#d6d6d6') + '">' + esc(m.role || '·') + '</span>' +
+    var m = msgs[i] || {}, key = 'm' + i, open = !!S.open[key];
+    h += '<div class="histrow" data-x="' + key + '" style="cursor:pointer">' +
+      '<span class="m" style="font-size:10.5px;color:' + (m.role === 'user' ? '#9a9a9a' : '#d6d6d6') + '">' + (open ? '▾ ' : '▸ ') + esc(m.role || '·') + '</span>' +
       '<span class="m ell" style="font-size:11.5px;color:#a8a8a8">' + esc(trunc(msgPreview(m), 160)) + '</span>' +
       '<span class="m r" style="font-size:10.5px;color:#5f5f5f">' + fK(JSON.stringify(m).length) + '</span></div>';
+    if (open) h += '<div class="msgx">' + msgDetail(m, key) + '</div>';
   }
   return h + '</div>';
 }
@@ -1447,21 +1548,53 @@ function requestTab(q, j) {
 function responseTab(q, j) {
   if (j === null) return loading();
   if (j.missing) return gone(q);
+  var resp = j.response || {}, bl = resp.content || [];
   var sh = q.shape || { think: 0, text: 0, tool: 0 };
-  return '<div class="hdrline" style="margin-top:24px"><div class="cap">Decoded response</div>' +
-    '<div class="note">' + fT(q.tok.out || 0) + ' out · ' + fT(sh.think) + ' thinking · stop ' + esc(q.stop || '—') + '</div></div>' +
-    '<pre style="max-height:340px">' + esc(respText(j.response)) + '</pre>';
+  var h = '<div class="hdrline" style="margin-top:24px"><div class="cap">Decoded response</div>' +
+    '<div class="note">' + bl.length + (bl.length === 1 ? ' block' : ' blocks') + ' · ' + fT(q.tok.out || 0) + ' out · ' +
+    fT(sh.think) + ' thinking · stop ' + esc(q.stop || resp.stop_reason || '—') + '</div></div>';
+  if (!bl.length) return h + '<div class="note" style="padding:12px 0">the response carried no content blocks</div>';
+
+  /* One card per block, in reply order: what the model thought, said and called
+     — each sized, each unfoldable on its own instead of one concatenated wall. */
+  for (var i = 0; i < bl.length; i++) {
+    var b = bl[i] || {};
+    var head = b.type || 'block', body = '', color = '#8a8a8a';
+    if (b.type === 'tool_use') { head = 'tool_use · ' + (b.name || ''); body = JSON.stringify(b.input || {}, null, 2); color = MIN; }
+    else if (b.type === 'thinking') { body = b.thinking || ''; color = MTH; }
+    else if (b.type === 'text') { body = b.text || ''; color = '#d6d6d6'; }
+    else { body = JSON.stringify(b, null, 2); }
+    h += '<div class="blk"><div class="bh"><span style="color:' + color + '">' + esc(head) + '</span>' +
+      '<span class="m">' + fK((body || '').length) + '</span></div>' + foldPre('r' + i, body, 900) + '</div>';
+  }
+  return h;
 }
+
+/* The verbatim string behind the raw tab, kept for the copy button. Rewritten
+   on every rawTab render, so it always matches what is on screen. */
+var RAWTXT = '';
 
 /** @param {reqRow} q @param {captureView|null} j @returns {string} */
 function rawTab(q, j) {
   if (j === null) return loading();
   if (j.missing) return gone(q);
-  var raw = JSON.stringify(j.request, null, 2) || '';
+  var side = S.rawSide === 'response' ? 'response' : 'request';
+  var src = side === 'response' ? j.response : j.request;
+  var raw = src == null ? '' : (JSON.stringify(src, null, 2) || '');
   if (raw.length > 400000) raw = raw.slice(0, 400000) + '\n… truncated';
+  RAWTXT = raw;
+
+  var h = '<div class="hdrline" style="margin-top:24px">' +
+    '<div style="display:flex;align-items:baseline;gap:16px"><div class="cap">Raw body</div>' +
+    '<span class="rsw' + (side === 'request' ? ' on' : '') + '" data-raw="request">request</span>' +
+    '<span class="rsw' + (side === 'response' ? ' on' : '') + '" data-raw="response">response</span></div>' +
+    '<div style="display:flex;align-items:baseline;gap:14px">' +
+    '<span class="note">' + (side === 'request' ? fK(q.bytes.total) : fK(raw.length)) + '</span>' +
+    (raw ? '<span class="more" id="rawcopy" style="margin-top:0">copy</span>' : '') + '</div></div>';
+  if (!raw) return h + '<div class="note" style="padding:12px 0">no ' + side + ' body was captured</div>';
+
   var lines = raw.split('\n'), i;
-  var h = '<div class="hdrline" style="margin-top:24px"><div class="cap">Raw request body</div>' +
-    '<div class="note">' + fK(q.bytes.total) + '</div></div><div class="rawbox">';
+  h += '<div class="rawbox" style="max-height:540px">';
   for (i = 0; i < lines.length; i++) {
     h += '<div class="rawrow"><span class="m rawn">' + (i + 1) + '</span><span class="m rawtx">' + esc(lines[i]) + '</span></div>';
   }
@@ -1483,6 +1616,30 @@ function wireInsp() {
     S.toolsAll = !S.toolsAll;
     redrawInsp();
   };
+
+  // expand / collapse toggles: message rows, block bodies, the system prompt
+  var xs = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#insp [data-x]'));
+  for (i = 0; i < xs.length; i++) xs[i].onclick = (function (k) {
+    return function (/** @type {MouseEvent} */ ev) {
+      ev.stopPropagation(); // a block toggle must not also toggle its message row
+      S.open[k] = !S.open[k];
+      redrawInsp();
+    };
+  })(/** @type {string} */ (xs[i].getAttribute('data-x')));
+
+  // the raw tab's request / response switch, and its copy button
+  var rs = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#insp .rsw'));
+  for (i = 0; i < rs.length; i++) rs[i].onclick = (function (side) {
+    return function () { S.rawSide = side; redrawInsp(); };
+  })(/** @type {string} */ (rs[i].getAttribute('data-raw')));
+  var rc = /** @type {HTMLElement|null} */ (document.querySelector('#insp #rawcopy'));
+  if (rc) {
+    var rcEl = rc;
+    rcEl.onclick = function () {
+      if (navigator.clipboard) navigator.clipboard.writeText(RAWTXT);
+      rcEl.textContent = 'copied';
+    };
+  }
 }
 function redrawInsp() {
   var q = rowOf(S.id);

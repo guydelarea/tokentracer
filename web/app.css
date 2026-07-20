@@ -108,6 +108,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,'Helvetic
 .empty{padding:34px 0;font-size:13px;color:#7a7a7a;line-height:1.7}
 .empty .m{color:#c9c9c9}
 
+/* Subagent sessions fold into their parent's row; the chip is all that shows
+   on the front page, and the drill-down list lives in the trace. */
+.agn{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9px;letter-spacing:0.06em;color:#5aa2f7;border:1px solid rgba(90,162,247,0.35);background:rgba(90,162,247,0.07);padding:1px 6px;white-space:nowrap;flex:none}
+.agrow{display:grid;grid-template-columns:24px minmax(220px,1.4fr) 92px 74px 70px 84px;gap:0 16px;align-items:center;padding:9px 0;border-bottom:1px solid rgba(255,255,255,0.045);cursor:pointer}
+.agrow:hover{background:rgba(255,255,255,0.028)}
+
 /* ---------- session trace ---------- */
 .back{display:inline-block;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:#8a8a8a;cursor:pointer}
 .back:hover{color:#ffffff}
@@ -201,6 +207,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,'Helvetic
 .sysrow{display:grid;grid-template-columns:78px 1fr 70px;gap:12px;align-items:center;padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.04)}
 .msgrow{display:grid;grid-template-columns:78px 1fr 70px;gap:12px;align-items:center;padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.04)}
 .histrow{display:grid;grid-template-columns:76px 1fr 56px;gap:12px;align-items:baseline;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.035)}
+/* An unfolded message: its blocks, indented under the row that named it. */
+.msgx{margin:2px 0 8px;padding:2px 0 4px 14px;border-left:1px solid rgba(255,255,255,0.09)}
+.msgx pre{max-height:300px}
+/* One content block — of a message, or of the reply — named and sized. */
+.blk{margin-top:12px;border:1px solid rgba(255,255,255,0.07);background:rgba(255,255,255,0.014);padding:10px 12px 12px}
+.blk .bh{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-size:9.5px;font-weight:600;letter-spacing:0.12em;text-transform:uppercase}
+.blk .bh .m{font-size:10px;font-weight:400;letter-spacing:0;text-transform:none;color:#5f5f5f}
+.blk pre{margin-top:10px}
+.blk .more{margin-top:10px}
+/* The raw tab's request / response switch. */
+.rsw{font-size:10px;font-weight:600;letter-spacing:0.12em;text-transform:uppercase;color:#5f5f5f;cursor:pointer;padding-bottom:2px;border-bottom:1px solid transparent}
+.rsw:hover{color:#ffffff}
+.rsw.on{color:#ffffff;border-bottom-color:#e8e8e8}
 .rawbox{margin-top:12px;background:#050505;border:1px solid rgba(255,255,255,0.05);padding:14px;max-height:380px;overflow:auto}
 .rawrow{display:grid;grid-template-columns:30px 1fr;gap:14px}
 .rawn{font-size:10.5px;line-height:1.7;color:#3d3d3d;text-align:right}

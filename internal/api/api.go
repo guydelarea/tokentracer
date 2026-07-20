@@ -150,6 +150,21 @@ func (s *server) trace(w http.ResponseWriter, r *http.Request) {
 
 	view := foldTrace(sid, rows, set, results, gone, s.rates, s.now())
 
+	// The subagents this session spawned. Fail-soft: a broken child query costs
+	// the trace its agents list, never the trace.
+	if kids, err := s.st.AgentRows(dbSid(sid)); err != nil {
+		log.Printf("tokentracer: agent rows for %q: %v", sid, err)
+	} else if len(kids) > 0 {
+		view.Agents = foldAgents(kids, s.rates, s.now())
+		for _, a := range view.Agents {
+			view.AgentCost += a.Cost
+			view.AgentReq += a.Req
+			if a.Priced {
+				view.Priced = true
+			}
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(view); err != nil {
 		log.Printf("tokentracer: encoding trace %q: %v", sid, err)
