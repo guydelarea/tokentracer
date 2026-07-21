@@ -146,6 +146,7 @@
  * @typedef {object} overview
  * @property {number} burnNow   $/hr, extrapolated from the current window
  * @property {number} burnAvg   $/hr, lifetime
+ * @property {number} todayCost $ since local midnight, priced rows only
  * @property {number} reqHr
  * @property {number} winReqs
  * @property {number} avgReq
@@ -335,7 +336,7 @@ var CTOOL = '#c9c9c9', CSYS = '#7a7a7a', CHIST = '#454545';
 /** @returns {overview} */
 function zeroOverview() {
   return {
-    burnNow: 0, burnAvg: 0, reqHr: 0, winReqs: 0, avgReq: 0, hitNow: 0, hitAvg: 0,
+    burnNow: 0, burnAvg: 0, todayCost: 0, reqHr: 0, winReqs: 0, avgReq: 0, hitNow: 0, hitAvg: 0,
     peakMin: 0, windowMin: 10, coldStart: false,
     tokens: { in: 0, read: 0, write: 0, out: 0 },
     latency: { p50Ttft: 0, p95Ttft: 0 },
@@ -358,9 +359,10 @@ var T = null;
 /** The whole of the page's state: which screen, which session, which request.
  * `open` is the inspector's expand/collapse state — one keyed map rather than a
  * flag per thing, because the set of expandable things is data-driven. It is
- * reset whenever a new request is opened.
- * @type {{sid: string|null, id: number|null, tab: string, toolsAll: boolean, cutAll: boolean, open: Record<string, boolean|undefined>, rawSide: string}} */
-var S = { sid: null, id: null, tab: 'request', toolsAll: false, cutAll: false, open: {}, rawSide: 'request' };
+ * reset whenever a new request is opened. `xrow` is the same idea for the trace
+ * list's unfolded rows, keyed by request id so it survives the 2s re-render.
+ * @type {{sid: string|null, id: number|null, tab: string, toolsAll: boolean, cutAll: boolean, open: Record<string, boolean|undefined>, rawSide: string, xrow: Record<number, boolean|undefined>}} */
+var S = { sid: null, id: null, tab: 'request', toolsAll: false, cutAll: false, open: {}, rawSide: 'request', xrow: {} };
 
 var PV = /** @type {Record<string, number|undefined>} */ ({}), PVT = /** @type {Record<string, number|undefined>} */ ({});
 /** @type {captureView|null} */
@@ -548,6 +550,7 @@ function renderHome() {
   else if (ratio > 1.35) burnSub = '▲ ' + ratio.toFixed(1) + '× the average of ' + fM(burnAvg, 2) + '/hr · ' + fM(D.cost, 2) + ' total';
   else if (ratio < 0.7) burnSub = '▾ below the ' + fM(burnAvg, 2) + '/hr average · ' + fM(D.cost, 2) + ' total';
   else burnSub = 'steady · avg ' + fM(burnAvg, 2) + '/hr · ' + fM(D.cost, 2) + ' total';
+  if (D.traced) burnSub = fM(ov.todayCost || 0, 2) + ' today · ' + burnSub;
 
   /* Could have saved: schemas that ship on every request and are never called,
      priced at the cadence the live sessions are actually running at. The only
@@ -1161,7 +1164,7 @@ function traceList(t) {
 
   var h = '<div style="margin-top:54px;padding-bottom:80px">' +
     '<div class="cap">Trace <span class="sub">· ' + R.length + (R.length === 1 ? ' request' : ' requests') +
-    ' · click one to inspect it</span></div>';
+    ' · click one to unfold it</span></div>';
 
   h += miniCharts(t);
 
@@ -1176,6 +1179,7 @@ function traceList(t) {
       h += '<div class="gap">⋯ idle ' + esc(dur(e.gapMs)) + (e.cause === 'gap' ? ' — the cached prefix went cold' : '') + '</div>';
     }
     h += traceRow(R[i], i, maxMs);
+    if (S.xrow[R[i].id]) h += traceDetail(R[i], e);
   }
   return h + '</div>';
 }
@@ -1186,8 +1190,10 @@ function traceRow(q, i, maxMs) {
   var stC = err ? MER : (q.probe ? '#7f7f7f' : 'rgba(47,191,135,0.85)');
   var newTot = (t.in || 0) + (t.write || 0); // never summed with cache reads — they are different money
   var barW = Math.min(100, Math.max(1.5, ((q.ms || 0) / maxMs) * 100)).toFixed(1) + '%';
+  var open = !!S.xrow[q.id];
 
-  var op = '<span class="op">';
+  var op = '<span class="op">' +
+    '<span class="m" style="flex:none;font-size:9px;color:' + (open ? '#d6d6d6' : '#5f5f5f') + '">' + (open ? '▾' : '▸') + '</span>';
   if (o.tag !== 'tool_use') op += '<span class="m" style="flex:none;font-size:9.5px;color:' + o.tagC + '">' + esc(o.tag) + '</span>';
   if (o.name) op += '<span class="m" style="flex:none;font-size:11px;color:#e4e4e4">' + esc(o.name) + '</span>';
   if (o.args) op += '<span class="m ell" style="font-size:10.5px;color:#7a7a7a">' + esc(o.args) + '</span>';
@@ -1210,6 +1216,112 @@ function traceRow(q, i, maxMs) {
     '<span class="lat"><span class="track" style="flex:1 1 0"><i style="width:' + barW + ';background:' + (err ? MER : '#8f8f8f') + '"></i></span>' +
     '<span class="m r" style="flex:none;font-size:10px;color:#7f7f7f">' + fC(q.ms) + '</span></span>' +
     '<span class="r">' + cost + '</span></div>';
+}
+
+/** One line of an unfolded row's breakdown: swatch, name, and two right-aligned figures. */
+/** @param {string} color @param {string} label @param {string} a @param {string} b @returns {string} */
+function qxLane(color, label, a, b) {
+  return '<div class="qxlane">' + swatch(color) +
+    '<span style="color:#b5b5b5">' + esc(label) + '</span>' +
+    '<span class="m r" style="color:#9f9f9f">' + a + '</span>' +
+    '<span class="m r" style="color:#e0e0e0">' + b + '</span></div>';
+}
+
+/* The row, unfolded in place: everything the wire already knows about this one
+   request — the bill by token class, where the shipped bytes went, what the
+   output was spent on, what the cache did and why — parsed and laid out, without
+   leaving the list. The captured bodies stay one click further, in the inspector:
+   they need a second fetch, and most questions are answered before them. */
+/** @param {reqRow} q @param {cacheEvent|undefined} e @returns {string} */
+function traceDetail(q, e) {
+  var t = q.tok, c = q.cost, sh = q.shape || { think: 0, text: 0, tool: 0 }, b = q.bytes;
+  var h = '<div class="qx">';
+
+  // The ask, in full — the op column can only gesture at it.
+  if (q.label) h += '<div class="qxask"><span class="m" style="font-size:10px;color:#6e6e6e">asked · </span>' + esc(q.label) + '</div>';
+  if (q.errMsg) h += '<div class="errbox" style="margin-top:10px"><div class="m" style="font-size:11.5px;color:#ff7a7a">' +
+    esc(q.status + ' · ' + (q.errType || '')) + '</div>' +
+    '<div style="margin-top:6px;font-size:12px;color:#c9c9c9;line-height:1.6">' + esc(q.errMsg) + '</div></div>';
+
+  h += '<div class="qxgrid">';
+
+  // ---- billing: the row's own quartet, tokens next to dollars ----
+  var total = rowCost(q), denom = total > 0 ? total : 1;
+  h += '<div><div class="cap">Billing · ' + esc(shortModel(q.model)) + '</div>';
+  if (q.priced) {
+    h += '<div class="m qxbig">' + fM(total, 4) + '</div>' +
+      '<div class="bar" style="height:5px;margin-top:10px">' +
+      '<span style="width:' + pctOf(c.read || 0, denom) + ';background:' + MRD + '"></span>' +
+      '<span style="width:' + pctOf(c.in || 0, denom) + ';background:' + MIN + '"></span>' +
+      '<span style="width:' + pctOf(c.write || 0, denom) + ';background:' + MWR + '"></span>' +
+      '<span style="width:' + pctOf(c.out || 0, denom) + ';background:' + MOU + '"></span></div>';
+  } else {
+    h += '<div style="margin:10px 0 4px"><span class="badge unp">unpriced</span></div>';
+  }
+  h += '<div style="margin-top:6px">' +
+    qxLane(MRD, 'cache read · 0.1×', fT(t.read), q.priced ? fM(c.read || 0, 4) : '—') +
+    qxLane(MIN, 'fresh input · 1×', fT(t.in), q.priced ? fM(c.in || 0, 4) : '—') +
+    qxLane(MWR, 'cache write · 1.25×', fT(t.write), q.priced ? fM(c.write || 0, 4) : '—') +
+    qxLane(MOU, 'output', fT(t.out), q.priced ? fM(c.out || 0, 4) : '—') +
+    '</div></div>';
+
+  // ---- payload in, and what the output was spent on ----
+  var btot = b.total || (b.tools + b.system + b.messages) || 1;
+  h += '<div><div class="cap">Shipped · ' + fK(b.total) + '</div>' +
+    '<div class="bar" style="height:5px;margin-top:10px">' +
+    '<span style="width:' + pctOf(b.tools, btot) + ';background:' + CTOOL + '"></span>' +
+    '<span style="width:' + pctOf(b.system, btot) + ';background:' + CSYS + '"></span>' +
+    '<span style="width:' + pctOf(b.messages, btot) + ';background:' + CHIST + '"></span></div>' +
+    '<div style="margin-top:6px">' +
+    qxLane(CTOOL, 'tool schemas', fK(b.tools), pct0(b.tools, btot)) +
+    qxLane(CSYS, 'system prompt', fK(b.system), pct0(b.system, btot)) +
+    qxLane(CHIST, 'message history', fK(b.messages), pct0(b.messages, btot)) +
+    '</div>';
+  var otot = (sh.think || 0) + (sh.text || 0) + (sh.tool || 0);
+  h += '<div class="cap" style="margin-top:16px">Output · ' + fT(t.out) + ' tok</div>';
+  if (otot > 0) {
+    h += '<div class="bar" style="height:5px;margin-top:10px">' +
+      '<span style="width:' + pctOf(sh.think || 0, otot) + ';background:' + MTH + '"></span>' +
+      '<span style="width:' + pctOf(sh.text || 0, otot) + ';background:' + MOU + '"></span>' +
+      '<span style="width:' + pctOf(sh.tool || 0, otot) + ';background:' + MIN + '"></span></div>' +
+      '<div style="margin-top:6px">' +
+      qxLane(MTH, 'thinking', fT(sh.think), pct0(sh.think, otot)) +
+      qxLane(MOU, 'text', fT(sh.text), pct0(sh.text, otot)) +
+      qxLane(MIN, 'tool calls', fT(sh.tool), pct0(sh.tool, otot)) +
+      '</div>';
+  } else {
+    h += '<div class="note" style="padding:8px 0">no output tokens</div>';
+  }
+  h += '</div>';
+
+  // ---- what the cache did, and the clock ----
+  h += '<div><div class="cap">Cache & timing</div>';
+  if (e) {
+    h += '<div style="display:flex;align-items:baseline;gap:10px;margin-top:10px">' +
+      '<span class="chip" style="color:' + cacheColor(e) + ';border-color:rgba(255,255,255,0.14)">' + esc(e.class) + '</span>' +
+      (e.rebill ? '<span class="m" style="font-size:11px;color:' + MER + '">' + fUsd(e.rebill) + ' re-billed</span>' : '') + '</div>' +
+      '<div style="margin-top:9px;font-size:11.5px;color:#9f9f9f;line-height:1.55">' +
+      esc(e.class === 'hit' ? 'the cached prefix matched — history billed at 0.1×' : causeText(e)) + '</div>';
+    if (e.gapMs > 1000) h += '<div class="note" style="margin-top:7px">idle ' + esc(dur(e.gapMs)) + ' before this request</div>';
+  }
+  var rest = Math.max(0, (q.ms || 0) - (q.ttft || 0));
+  h += '<div class="bar" style="height:5px;margin-top:14px">' +
+    '<span style="width:' + pctOf(q.ttft || 0, q.ms || 1) + ';background:' + MIN + '"></span>' +
+    '<span style="width:' + pctOf(rest, q.ms || 1) + ';background:rgba(90,162,247,0.32)"></span></div>' +
+    '<div style="margin-top:6px">' +
+    qxLane(MIN, 'first token', q.ttft > 0 ? fC(q.ttft) + ' ms' : '—', '') +
+    qxLane('rgba(90,162,247,0.32)', 'full response', fC(q.ms) + ' ms', '') +
+    '</div>' +
+    '<div style="display:flex;flex-wrap:wrap;gap:7px;margin-top:12px">' +
+    '<span class="chip" style="color:' + (q.stop === 'max_tokens' ? '#ff7a7a' : '#b5b5b5') +
+    ';border-color:' + (q.stop === 'max_tokens' ? 'rgba(255,90,90,0.4)' : 'rgba(255,255,255,0.12)') + '">stop: ' +
+    esc(ok(q) ? (q.stop || '—') : '—') + '</span>' +
+    (q.aborted ? '<span class="chip" style="color:#ff7a7a;border-color:rgba(255,90,90,0.4)">aborted by client</span>' : '') +
+    '</div></div>';
+
+  h += '</div>'; // qxgrid
+  h += '<div class="more" data-insp="' + esc(q.id) + '" style="margin-top:14px">request & response bodies →</div>';
+  return h + '</div>';
 }
 
 /* Requests, errors and latency over the session's span — equal TIME per column,
@@ -1677,11 +1789,15 @@ function wire() {
   var ta = document.querySelector('#app #toolsall');
   if (ta) /** @type {HTMLElement} */ (ta).onclick = function () { S.toolsAll = !S.toolsAll; render(); };
 
-  // trace rows → the inspector
+  // trace rows unfold in place; the bodies live one click further, in the inspector
   els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-id]'));
   for (i = 0; i < els.length; i++) els[i].onclick = (function (id) {
-    return function () { hideTip(); openInsp(id); };
+    return function () { hideTip(); S.xrow[id] = !S.xrow[id]; render(); };
   })(Number(els[i].getAttribute('data-id')));
+  els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-insp]'));
+  for (i = 0; i < els.length; i++) els[i].onclick = (function (id) {
+    return function () { hideTip(); openInsp(id); };
+  })(Number(els[i].getAttribute('data-insp')));
 
   // the overview's spend timeline
   els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-b]'));
@@ -1699,11 +1815,14 @@ function wire() {
 
   // the trace's per-request charts
   els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-q]'));
-  for (i = 0; i < els.length; i++) els[i].onmouseenter = (function (idx) {
+  for (i = 0; i < els.length; i++) els[i].onmouseenter = (function (idx, isRow) {
     /** @param {MouseEvent} ev */
     return function (ev) {
       var q = TIPDATA.rows[idx], e = TIPDATA.cache[idx];
       if (!q) return;
+      // An unfolded row already shows everything the tooltip would — hovering it
+      // must not float a summary over the breakdown being read.
+      if (isRow && S.xrow[q.id]) return;
       var o = opParts(q);
       /** @type {string[][]} */
       var rows;
@@ -1715,7 +1834,7 @@ function wire() {
         (e && e.class === 'break' ? ' · cache break' : '');
       showTip(ev, tipHtml(clock(tms(q.time)) + ' · ' + (o.name || o.tag), rows, foot));
     };
-  })(Number(els[i].getAttribute('data-q')));
+  })(Number(els[i].getAttribute('data-q')), els[i].className.indexOf('qrow') >= 0);
 
   // the trace's request / error / latency strips
   els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-k]'));
@@ -1786,7 +1905,7 @@ function pollTrace(sid) {
 
 /** @param {string} sid */
 function openTrace(sid) {
-  S.sid = sid; T = null; S.toolsAll = false; S.cutAll = false;
+  S.sid = sid; T = null; S.toolsAll = false; S.cutAll = false; S.xrow = {};
   render();      // the shell, with its loading note
   pollTrace(sid);
 }

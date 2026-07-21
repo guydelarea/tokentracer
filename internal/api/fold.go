@@ -46,8 +46,9 @@ type storage struct {
 }
 
 type overview struct {
-	BurnNow   float64  `json:"burnNow"` // $/hr, extrapolated from the current window
-	BurnAvg   float64  `json:"burnAvg"` // $/hr, lifetime
+	BurnNow   float64  `json:"burnNow"`   // $/hr, extrapolated from the current window
+	BurnAvg   float64  `json:"burnAvg"`   // $/hr, lifetime
+	TodayCost float64  `json:"todayCost"` // $ since local midnight, priced rows only
 	ReqHr     int      `json:"reqHr"`
 	WinReqs   int      `json:"winReqs"`
 	AvgReq    float64  `json:"avgReq"`
@@ -181,11 +182,15 @@ func fold(lifetime []store.UsageRow, window []store.Row, tools map[string]toolse
 	// ---- lifetime: total cost, average burn, average cache hit rate ----
 	var lifeIn, lifeRead, lifeWrite, lifeOut int64
 	oldest := now
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	for _, u := range lifetime {
 		at := time.UnixMilli(u.TsMs)
 		bill := billing.Compute(rates, billedModel(u.ModelReq, u.ModelServed), usageOf(u), at)
 		if bill.Priced {
 			v.Cost += bill.Total
+			if !at.Before(dayStart) {
+				v.Overview.TodayCost += bill.Total
+			}
 		} else {
 			v.UnpricedReqs++ // never a silent $0
 		}

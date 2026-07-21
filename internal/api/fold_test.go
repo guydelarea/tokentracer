@@ -84,6 +84,18 @@ func TestFoldLifetimeCost(t *testing.T) {
 	}
 }
 
+// Today is midnight-to-now in the server's zone: the 5-minute-old row counts,
+// the 13-hour-old one (yesterday, `now` being 12:00) does not.
+func TestFoldTodayCostStopsAtMidnight(t *testing.T) {
+	life := []store.UsageRow{
+		usage(5, "test-model", 1_000_000, 0, 0, 0, 0),     // today: $3.00
+		usage(13*60, "test-model", 0, 0, 0, 0, 1_000_000), // yesterday: $15.00
+	}
+	v := fold(life, nil, nil, testRates, now, testCfg)
+	close(t, "Cost", v.Cost, 18)
+	close(t, "TodayCost", v.Overview.TodayCost, 3)
+}
+
 // The footgun this project exists to fix: a model with no rate must never be
 // quietly worth $0.
 func TestFoldUnpricedModelIsSurfacedNotZeroed(t *testing.T) {
@@ -470,7 +482,7 @@ func TestStatsViewJSONContract(t *testing.T) {
 	if !ok {
 		t.Fatal("overview is not an object")
 	}
-	for _, k := range []string{"burnNow", "burnAvg", "reqHr", "winReqs", "avgReq", "hitNow", "hitAvg", "peakMin",
+	for _, k := range []string{"burnNow", "burnAvg", "todayCost", "reqHr", "winReqs", "avgReq", "hitNow", "hitAvg", "peakMin",
 		"latency", "timeline", "windowMin", "tokens", "wasteHr", "unusedCount"} {
 		if _, ok := ov[k]; !ok {
 			t.Errorf("overview is missing the contract key %q", k)
