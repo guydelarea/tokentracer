@@ -170,6 +170,7 @@
  * @property {number} traced
  * @property {number} cost
  * @property {number} unpricedReqs
+ * @property {string[]} unpricedModels
  * @property {tokens} tokens    lifetime
  * @property {overview} overview
  * @property {sessionRow[]} sessions
@@ -347,7 +348,7 @@ function zeroOverview() {
 
 /** @type {statsView} */
 var D = {
-  port: 0, upstream: '', traced: 0, cost: 0, unpricedReqs: 0,
+  port: 0, upstream: '', traced: 0, cost: 0, unpricedReqs: 0, unpricedModels: [],
   tokens: { in: 0, read: 0, write: 0, out: 0 },
   overview: zeroOverview(),
   sessions: [],
@@ -1878,8 +1879,13 @@ function poll() {
     var host = String(j.upstream || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
     $('#route').textContent = 'localhost:' + j.port + ' → ' + host;
     $('#hdrstat').textContent = fC(j.traced) + ' traced · ' + fM(j.cost, 2) + ' total';
-    var u = $('#unp'), n = j.unpricedReqs || 0;
-    u.textContent = n + (n === 1 ? ' unpriced request' : ' unpriced requests');
+    var u = $('#unp'), n = j.unpricedReqs || 0, um = j.unpricedModels || [];
+    // The models, not just the count: the badge is only actionable if it says
+    // which rate row is missing. Short lists go inline; a long one would push the
+    // header around, so it falls back to the tooltip.
+    u.textContent = n + (n === 1 ? ' unpriced request' : ' unpriced requests') +
+      (um.length && um.length <= 2 ? ' · ' + um.join(' ') : '');
+    u.title = um.length ? 'no rate for: ' + um.join(', ') : '';
     u.style.display = n > 0 ? 'inline-block' : 'none';
     var store = j.storage || { captureBytes: 0, retention: 'off' };
     $('#capsz').textContent = fK(store.captureBytes) + ' captures';

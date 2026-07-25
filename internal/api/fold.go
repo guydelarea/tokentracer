@@ -25,6 +25,12 @@ type statsView struct {
 	Tokens       tokens   `json:"tokens"` // lifetime
 	Overview     overview `json:"overview"`
 
+	// UnpricedModels names them. A count alone tells you the total is wrong and
+	// nothing about how to fix it; the model string is the whole fix — it is the
+	// row that has to be added to the rate table. Sorted, so the badge does not
+	// reshuffle on every 2s poll.
+	UnpricedModels []string `json:"unpricedModels"`
+
 	// The front page is the sessions table. There is no flat request log here any
 	// more: a request is not a thing anyone did, and the twenty of them that made
 	// up one turn are noise until you have picked the session they belong to. The
@@ -182,10 +188,12 @@ func fold(lifetime []store.UsageRow, window []store.Row, tools map[string]toolse
 	// ---- lifetime: total cost, average burn, average cache hit rate ----
 	var lifeIn, lifeRead, lifeWrite, lifeOut int64
 	oldest := now
+	unpriced := map[string]bool{}
 	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	for _, u := range lifetime {
 		at := time.UnixMilli(u.TsMs)
-		bill := billing.Compute(rates, billedModel(u.ModelReq, u.ModelServed), usageOf(u), at)
+		model := billedModel(u.ModelReq, u.ModelServed)
+		bill := billing.Compute(rates, model, usageOf(u), at)
 		if bill.Priced {
 			v.Cost += bill.Total
 			if !at.Before(dayStart) {
@@ -193,6 +201,10 @@ func fold(lifetime []store.UsageRow, window []store.Row, tools map[string]toolse
 			}
 		} else {
 			v.UnpricedReqs++ // never a silent $0
+			if model == "" {
+				model = "(unnamed)" // neither the path nor the body named one
+			}
+			unpriced[model] = true
 		}
 		lifeIn += u.In
 		lifeRead += u.Read
@@ -203,6 +215,11 @@ func fold(lifetime []store.UsageRow, window []store.Row, tools map[string]toolse
 		}
 	}
 	v.Tokens = tokens{In: lifeIn, Read: lifeRead, Write: lifeWrite, Out: lifeOut}
+	v.UnpricedModels = make([]string, 0, len(unpriced))
+	for m := range unpriced {
+		v.UnpricedModels = append(v.UnpricedModels, m)
+	}
+	sort.Strings(v.UnpricedModels)
 	v.Overview.HitAvg = hitRate(lifeRead, lifeIn+lifeRead+lifeWrite)
 	if len(lifetime) > 0 {
 		// Spread lifetime spend over how long we have been watching — but never

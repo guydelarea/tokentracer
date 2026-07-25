@@ -279,6 +279,12 @@ func TestSeedTablePricesRealModelNames(t *testing.T) {
 		"claude-sonnet-4-5-20250929",
 		"anthropic.claude-sonnet-4-5",
 		"claude-3-7-sonnet-20250219",
+		// The launch-gap models. Every one of these was UNPRICED in the dashboard
+		// until its row was added by hand, which is the failure this test pins.
+		"claude-opus-5",
+		"claude-opus-5[1m]",      // Claude Code's 1M-window spelling
+		"claude-opus-5@20260601", // Vertex's spelling
+		"claude-mythos-5",
 	}
 	for _, m := range models {
 		t.Run(m, func(t *testing.T) {
@@ -296,6 +302,27 @@ func TestSeedTablePricesRealModelNames(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The one dated price in the table. Sonnet 5's introductory rate ends on a
+// published date, and a session traced either side of it must bill at what it
+// actually cost — not at whichever number happened to be hard-coded.
+func TestSeedTableHonoursTheSonnet5IntroWindow(t *testing.T) {
+	oneM := Usage{In: 1_000_000, Out: 1_000_000}
+
+	intro := Compute(Rates, "claude-sonnet-5", oneM, sonnet5StandardFrom.Add(-time.Hour))
+	if !intro.Priced {
+		t.Fatal("claude-sonnet-5 is unpriced inside the intro window")
+	}
+	closeTo(t, intro.In, 2, "intro In")
+	closeTo(t, intro.Out, 10, "intro Out")
+
+	std := Compute(Rates, "claude-sonnet-5", oneM, sonnet5StandardFrom)
+	if !std.Priced {
+		t.Fatal("claude-sonnet-5 is unpriced once the intro window closes — the standard row is missing")
+	}
+	closeTo(t, std.In, 3, "standard In")
+	closeTo(t, std.Out, 15, "standard Out")
 }
 
 // Ordering invariant: the seed table is sorted most-specific-key-first, so no

@@ -109,6 +109,12 @@ func TestFoldUnpricedModelIsSurfacedNotZeroed(t *testing.T) {
 		t.Errorf("UnpricedReqs = %d, want 1", v.UnpricedReqs)
 	}
 	close(t, "Cost", v.Cost, 3) // the unpriced row contributes nothing, and says so
+
+	// And it names the model. The count says the total is wrong; the name says
+	// which rate row to add, which is the only thing anyone can act on.
+	if len(v.UnpricedModels) != 1 || v.UnpricedModels[0] != "some-unreleased-model" {
+		t.Errorf("UnpricedModels = %v, want [some-unreleased-model]", v.UnpricedModels)
+	}
 }
 
 // Regression, found by running the real binary: a request can ASK for a model we
@@ -462,7 +468,7 @@ func TestStatsViewJSONContract(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, k := range []string{"port", "upstream", "traced", "cost", "unpricedReqs", "tokens", "overview", "sessions", "storage"} {
+	for _, k := range []string{"port", "upstream", "traced", "cost", "unpricedReqs", "unpricedModels", "tokens", "overview", "sessions", "storage"} {
 		if _, ok := got[k]; !ok {
 			t.Errorf("/api/stats is missing the contract key %q", k)
 		}

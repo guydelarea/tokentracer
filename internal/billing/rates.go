@@ -1,7 +1,12 @@
-// Code generated from LiteLLM's community price registry. DO NOT EDIT BY HAND.
+// Seeded from LiteLLM's community price registry, then kept current by hand.
 //
 // Source: https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
-// Generated: 2026-07-13
+// Generated: 2026-07-13, hand-updated 2026-07-25 (opus-5, mythos-5, sonnet-5 intro window)
+//
+// Hand-added rows come from Anthropic's published list prices, not the registry,
+// which lags a model launch by weeks. A model that ships between regenerations is
+// the whole source of UNPRICED requests, so adding the row by hand is the fix —
+// but only ever with a price we can point at. A guess here is worse than a hole.
 //
 // Prices are USD per 1M tokens (the registry quotes per-token; these are x1e6).
 // Only litellm_provider == "anthropic" claude-* models are included; Bedrock and
@@ -21,10 +26,20 @@
 // but inventing historical windows would fabricate costs, so it goes unused here.
 //
 // Long-context tiers: the registry carries above-200K input/output rates only for
-// the sonnet-4 family. claude-sonnet-5 and the opus-4-5+ generation have no premium
-// tier in the registry, so none is asserted for them.
+// the sonnet-4 family. claude-sonnet-5 and the opus-4-5+ generation ship a 1M
+// window at standard rates with no long-context premium, so none is asserted for
+// them. That is a fact about those models, not an omission.
 
 package billing
+
+import "time"
+
+// Sonnet 5 launched at an introductory rate Anthropic publishes as "$2/$10 per
+// MTok through 2026-08-31". This is the one price in the table with a known end
+// date, so it is the one place the [From, Until) machinery earns its keep: past
+// the boundary the same key prices at the standard $3/$15, and a session traced
+// on either side of it bills at what it actually cost.
+var sonnet5StandardFrom = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 
 var Rates = []Rate{
 	{Key: "claude-3-7-sonnet-20250219", InPerM: 3, OutPerM: 15},
@@ -48,6 +63,9 @@ var Rates = []Rate{
 	{Key: "claude-opus-4-6", InPerM: 5, OutPerM: 25},
 	{Key: "claude-opus-4-7", InPerM: 5, OutPerM: 25},
 	{Key: "claude-opus-4-8", InPerM: 5, OutPerM: 25},
-	{Key: "claude-sonnet-5", InPerM: 2, OutPerM: 10},
+	{Key: "claude-mythos-5", InPerM: 10, OutPerM: 50},
+	{Key: "claude-sonnet-5", InPerM: 2, OutPerM: 10, Until: sonnet5StandardFrom},
+	{Key: "claude-sonnet-5", InPerM: 3, OutPerM: 15, From: sonnet5StandardFrom},
 	{Key: "claude-fable-5", InPerM: 10, OutPerM: 50},
+	{Key: "claude-opus-5", InPerM: 5, OutPerM: 25},
 }

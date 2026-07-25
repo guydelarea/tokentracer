@@ -39,6 +39,7 @@ There is no flat request log here. A request is not a thing anyone did — a ses
   "traced": 123,                 // lifetime request count
   "cost": 1.23,                  // lifetime priced total, USD
   "unpricedReqs": 0,             // rows whose model had no rate (badge in UI)
+  "unpricedModels": [],          // the distinct model names behind that count, sorted
   "tokens": { "in": 0, "read": 0, "write": 0, "out": 0 },   // lifetime
   "overview": {
     "burnNow": 0.0,              // $/hr, current window
