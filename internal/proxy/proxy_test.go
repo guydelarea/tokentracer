@@ -405,3 +405,39 @@ func TestTTFTStampedAtFirstBodyByte(t *testing.T) {
 		t.Error("Streamed = false, want true for a text/event-stream response")
 	}
 }
+
+// The proxy must hand upstream the path the client sent, byte for byte. On Vertex
+// the model name lives in the URL, and Claude Code spells the 1M-context variant
+// claude-opus-5[1m] — characters Go's url.String() escapes to %5B/%5D unless
+// RawPath says otherwise. Escaping them renames the model, and Vertex 404s it:
+// "There's an issue with the selected model". Regression test for that.
+func TestVertexPathReachesUpstreamUnescaped(t *testing.T) {
+	const want = "/v1/projects/p/locations/us-east5/publishers/anthropic/models/claude-opus-5[1m]:streamRawPredict"
+
+	got := make(chan string, 1)
+	front, _ := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// EscapedPath, not Path: Path is already unescaped, so it would hide the
+		// very mangling this test exists to catch.
+		got <- r.URL.EscapedPath()
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req, err := http.NewRequest(http.MethodPost, front.URL+want, strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	resp.Body.Close()
+
+	select {
+	case p := <-got:
+		if p != want {
+			t.Errorf("upstream saw path\n  %s\nwant\n  %s", p, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream never saw the request")
+	}
+}

@@ -165,9 +165,20 @@ func recordable(r *http.Request) bool {
 	return m != "" && m != "count-tokens"
 }
 
+// target is the upstream URL for a client request: the upstream base with the
+// client's path and query appended.
+//
+// RawPath is set, not just Path, and that is load-bearing. url.String() re-escapes
+// Path on Go's own terms, and Go escapes '[' and ']' — so a client asking for
+// .../models/claude-opus-5[1m]:streamRawPredict left here as
+// ...claude-opus-5%5B1m%5D... and Vertex 404'd a model that exists. On Vertex the
+// model name IS the path, so re-escaping the path renames the model. RawPath
+// carries the client's bytes through byte-for-byte; Go ignores it when it agrees
+// with Path anyway, so the ordinary /v1/messages case is unaffected.
 func (p *Proxy) target(r *http.Request) string {
 	u := *p.upstream
 	u.Path = strings.TrimSuffix(p.upstream.Path, "/") + r.URL.Path
+	u.RawPath = strings.TrimSuffix(p.upstream.EscapedPath(), "/") + r.URL.EscapedPath()
 	u.RawQuery = r.URL.RawQuery
 	return u.String()
 }
