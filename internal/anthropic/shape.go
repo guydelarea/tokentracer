@@ -144,6 +144,13 @@ type ResultItem struct {
 	N     int    `json:"n"`
 }
 
+// ToolResultRef is one result the client fed back to the model. ToolUseID
+// connects it to the response that invoked the tool without exposing its body.
+type ToolResultRef struct {
+	ToolUseID string `json:"toolUseId"`
+	Bytes     int    `json:"bytes"`
+}
+
 // ResultsInContext groups the tool_result blocks in a captured request body by
 // the tool that produced them, largest first.
 //
@@ -202,6 +209,32 @@ func ResultsInContext(body []byte) []ResultItem {
 		out = append(out, *it)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Bytes > out[j].Bytes })
+	return out
+}
+
+// ToolResults returns the tool results in a request's current hand-off. A
+// captured request contains cumulative history, so walking every message would
+// replay old results on every later session-graph node.
+func ToolResults(body []byte) []ToolResultRef {
+	var req request
+	if json.Unmarshal(body, &req) != nil {
+		return nil
+	}
+	m, ok := latestMessage(req.Messages)
+	if !ok || m.Role != "user" || !isArray(m.Content) {
+		return nil
+	}
+	var blocks []json.RawMessage
+	if json.Unmarshal(m.Content, &blocks) != nil {
+		return nil
+	}
+	var out []ToolResultRef
+	for _, b := range blocks {
+		var rb resultBlock
+		if json.Unmarshal(b, &rb) == nil && rb.Type == "tool_result" {
+			out = append(out, ToolResultRef{ToolUseID: rb.ToolUseID, Bytes: len(b)})
+		}
+	}
 	return out
 }
 

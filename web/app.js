@@ -253,6 +253,35 @@
  * @property {string} last
  */
 
+/** One tool invocation emitted by a reply in the causal session flow.
+ * @typedef {object} flowCall
+ * @property {string} [id]
+ * @property {string} name
+ * @property {string} [summary]
+ * @property {boolean} [agent]
+ * @property {boolean} [spawn]
+ * @property {string} [agentSid]
+ * @property {string} [agentLabel]
+ */
+
+/** One tool result carried back in a request.
+ * @typedef {object} flowResult
+ * @property {string} [toolUseId]
+ * @property {string} name
+ * @property {number} bytes
+ */
+
+/** One causal request → tools → next-request-results turn.
+ * @typedef {object} flowTurn
+ * @property {number} id
+ * @property {string} time
+ * @property {string} [ask]
+ * @property {number} status
+ * @property {boolean} captured
+ * @property {flowCall[]} calls
+ * @property {flowResult[]} results
+ */
+
 /**
  * @typedef {object} traceView
  * @property {string} sid
@@ -274,6 +303,7 @@
  * @property {number} contextWindow
  * @property {byteSplit} ctxBytes
  * @property {reqRow[]} rows
+ * @property {flowTurn[]} flow
  * @property {cacheEvent[]} cache
  * @property {number} breaks
  * @property {number} breakCost
@@ -363,7 +393,7 @@ var T = null;
  * reset whenever a new request is opened. `xrow` is the same idea for the trace
  * list's unfolded rows, keyed by request id so it survives the 2s re-render.
  * @type {{sid: string|null, id: number|null, tab: string, toolsAll: boolean, cutAll: boolean, open: Record<string, boolean|undefined>, rawSide: string, xrow: Record<number, boolean|undefined>}} */
-var S = { sid: null, id: null, tab: 'request', toolsAll: false, cutAll: false, open: {}, rawSide: 'request', xrow: {} };
+var S = { sid: null, id: null, tab: 'request', toolsAll: false, cutAll: false, graph: false, open: {}, rawSide: 'request', xrow: {} };
 
 var PV = /** @type {Record<string, number|undefined>} */ ({}), PVT = /** @type {Record<string, number|undefined>} */ ({});
 /** @type {captureView|null} */
@@ -711,6 +741,7 @@ function renderTrace() {
     '<span style="color:' + (t.live ? MRD : '#6f6f6f') + '">' + (t.live ? 'live' : 'idle ' + esc(t.idle)) + '</span></div>';
 
   h += traceStats(t);
+  h += sessionGraph(t);
   h += agentsPanel(t);
   h += insightCards(t);
   h += contextChart(t);
@@ -721,6 +752,92 @@ function renderTrace() {
   h += traceList(t);
 
   return h + '</div>';
+}
+
+/* ---------- session graph ----------
+   A context-style overview of the whole conversation. It is intentionally
+   collapsed: a person scans the graph first, then opens only the turn whose
+   operation flow they need to read. */
+/** @param {traceView} t @returns {string} */
+function sessionGraph(t) {
+  var F = t.flow || [], i, j, n = (t.rows || []).length;
+  if (!n) return '';
+
+  var h = '<div class="graph-toggle"><button type="button" id="flowgraph" aria-expanded="' + (S.graph ? 'true' : 'false') + '">' +
+    (S.graph ? '▾ hide session graph' : '▸ show session graph') + '</button><span class="note">' + n +
+    (n === 1 ? ' operation' : ' operations') + ' · prompts, tool calls, results, subagents</span></div>';
+  if (!S.graph) return h;
+  if (!F.length) return h + '<div class="flow-graph"><div class="flow-graph-note">loading capture-backed session graph…</div></div>';
+
+  h += '<section class="flow-graph" aria-label="Session execution graph"><div class="flow-graph-track">';
+  for (i = 0; i < F.length; i++) {
+    var turn = F[i], calls = turn.calls || [], results = turn.results || [];
+    h += '<button type="button" class="flow-graph-node' + (turn.status >= 400 ? ' err' : '') + '" data-graph-id="' + esc(turn.id) + '">' +
+      '<span class="flow-graph-head"><span>' + (i + 1) + '</span><time>' + esc(clock(tms(turn.time))) + '</time></span>' +
+      '<strong title="' + esc(turn.ask || 'assistant turn') + '">' + esc(trunc(turn.ask || 'assistant turn', 48)) + '</strong>';
+    if (results.length) {
+      h += '<span class="flow-graph-results">';
+      for (j = 0; j < results.length; j++) h += '<i>← ' + esc(results[j].name) + '</i>';
+      h += '</span>';
+    }
+    if (calls.length) {
+      h += '<span class="flow-graph-calls">';
+      for (j = 0; j < calls.length; j++) h += '<i class="' + (calls[j].spawn ? 'spawn' : (calls[j].agent ? 'agent' : '')) + '">→ ' + esc(calls[j].name) + '</i>';
+      h += '</span>';
+    } else {
+      h += '<span class="flow-graph-reply">reply</span>';
+    }
+    h += '</button>';
+  }
+  return h + '</div><div class="flow-graph-note">click an operation to open its causal detail in the trace below</div></section>';
+}
+
+/* ---------- causal operation flow ----------
+   The table stays compact. Open a request to inspect only that operation's
+   prompt, incoming results, outgoing tools, and any subagent it launched. */
+/** @param {traceView} t @param {number} id @returns {string} */
+function operationFlow(t, id) {
+  var F = t.flow || [], turn = null, i, j;
+  for (i = 0; i < F.length; i++) if (F[i].id === id) { turn = F[i]; break; }
+  if (!turn) return '';
+
+  var bad = turn.status >= 400;
+  var h = '<section class="flow flow-inline"><div class="hdrline"><div class="cap">Operation flow ' +
+    '<span class="sub">· prompt → agent action → tool result</span></div><div class="note">capture-backed causal detail</div></div>' +
+    '<div class="flow-legend"><span><i class="flow-dot user"></i>prompt</span><span><i class="flow-dot result"></i>result returned</span>' +
+    '<span><i class="flow-dot call"></i>agent call</span><span><i class="flow-dot spawn"></i>subagent spawned</span></div>' +
+    '<div class="flow-list"><article class="flow-turn' + (bad ? ' err' : '') + '"><div class="flow-rail"><span></span></div><div class="flow-body">' +
+    '<div class="flow-meta"><span class="m">' + esc(clock(tms(turn.time))) + '</span><span>this operation</span>' +
+    '<span class="flow-status" style="color:' + (bad ? MER : MRD) + '">' + esc(String(turn.status)) + '</span></div>';
+
+  if (turn.ask) h += '<div class="flow-ask"><span>USER</span><strong>' + esc(turn.ask) + '</strong></div>';
+  if (!turn.captured) return h + '<div class="flow-missing">capture pruned · request facts remain below</div></div></article></div></section>';
+
+  if (turn.results && turn.results.length) {
+    h += '<div class="flow-results">';
+    for (j = 0; j < turn.results.length; j++) {
+      var result = turn.results[j];
+      h += '<div class="flow-result"><span class="flow-arrow">↳</span><span class="flow-kind">RESULT</span>' +
+        '<span class="m">' + esc(result.name) + '</span><span class="flow-detail">' + fK(result.bytes) + ' returned to the agent</span></div>';
+    }
+    h += '</div>';
+  }
+
+  if (turn.calls && turn.calls.length) {
+    h += '<div class="flow-calls">';
+    for (j = 0; j < turn.calls.length; j++) {
+      var call = turn.calls[j], kind = call.spawn ? 'SPAWN' : (call.agent ? 'AGENT CALL' : 'TOOL');
+      h += '<div class="flow-call' + (call.spawn ? ' spawn' : '') + '"><span class="flow-arrow">↳</span>' +
+        '<span class="flow-kind">' + kind + '</span><span class="m flow-name">' + esc(call.name) + '</span>' +
+        (call.summary ? '<span class="flow-detail" title="' + esc(call.summary) + '">' + esc(call.summary) + '</span>' : '') +
+        (call.agentSid ? '<button type="button" class="flow-agent" data-sid="' + esc(call.agentSid) + '">trace subagent · ' + esc(call.agentLabel || call.agentSid) + ' →</button>' : '') +
+        '</div>';
+    }
+    h += '</div>';
+  } else if (!bad) {
+    h += '<div class="flow-reply">agent replied without a tool call</div>';
+  }
+  return h + '</div></article></div></section>';
 }
 
 /** @param {traceView} t @returns {string} */
@@ -1184,7 +1301,7 @@ function traceList(t) {
       h += '<div class="gap">⋯ idle ' + esc(dur(e.gapMs)) + (e.cause === 'gap' ? ' — the cached prefix went cold' : '') + '</div>';
     }
     h += traceRow(R[i], i, maxMs);
-    if (S.xrow[R[i].id]) h += traceDetail(R[i], e);
+    if (S.xrow[R[i].id]) h += operationFlow(t, R[i].id) + traceDetail(R[i], e);
   }
   return h + '</div>';
 }
@@ -1793,12 +1910,32 @@ function wire() {
   if (ca) /** @type {HTMLElement} */ (ca).onclick = function () { S.cutAll = !S.cutAll; render(); };
   var ta = document.querySelector('#app #toolsall');
   if (ta) /** @type {HTMLElement} */ (ta).onclick = function () { S.toolsAll = !S.toolsAll; render(); };
+  var fg = document.querySelector('#flowgraph');
+  if (fg) /** @type {HTMLElement} */ (fg).onclick = function () {
+    S.graph = !S.graph;
+    render();
+    if (S.graph && S.sid) pollTrace(S.sid, true, true);
+  };
 
   // trace rows unfold in place; the bodies live one click further, in the inspector
   els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-id]'));
   for (i = 0; i < els.length; i++) els[i].onclick = (function (id) {
-    return function () { hideTip(); S.xrow[id] = !S.xrow[id]; render(); };
+    return function () {
+      hideTip();
+      S.xrow[id] = !S.xrow[id];
+      render();
+      if (S.xrow[id] && S.sid) pollTrace(S.sid, true, true);
+    };
   })(Number(els[i].getAttribute('data-id')));
+  els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-graph-id]'));
+  for (i = 0; i < els.length; i++) els[i].onclick = (function (id) {
+    return function () {
+      S.graph = false; S.xrow[id] = true; render();
+      if (S.sid) pollTrace(S.sid, true, true);
+      var row = document.querySelector('[data-id="' + id + '"]');
+      if (row) row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    };
+  })(Number(els[i].getAttribute('data-graph-id')));
   els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-insp]'));
   for (i = 0; i < els.length; i++) els[i].onclick = (function (id) {
     return function () { hideTip(); openInsp(id); };
@@ -1897,27 +2034,42 @@ function poll() {
     // snaps it back under the cursor.
     var ret = /** @type {HTMLSelectElement} */ ($('#ret'));
     if (document.activeElement !== ret) ret.value = store.retention || 'off';
-    if (S.sid) pollTrace(S.sid); else render();
+    if (S.sid) pollTrace(S.sid, false); else render();
   }).catch(function () { /* the server is restarting; the next poll picks it up */ });
 }
 
-/** @param {string} sid */
-function pollTrace(sid) {
-  fetch('/api/trace?sid=' + encodeURIComponent(sid)).then(function (r) {
+/** @param {string} sid @param {boolean} flow @param {boolean} [forceRender] */
+function pollTrace(sid, flow, forceRender) {
+  var target = '/api/trace?sid=' + encodeURIComponent(sid) + (flow ? '&flow=1' : '');
+  fetch(target).then(function (r) {
     return r.ok ? r.json() : null;
   }).then(/** @param {traceView|null} j */ function (j) {
     if (S.sid !== sid) return; // they navigated away while it was in flight
     if (!j) { S.sid = null; T = null; render(); return; }
+    // A lightweight poll must not discard flow that an explicit, on-demand
+    // request just loaded for the graph or an expanded operation.
+    if (!flow && T && T.flow) j.flow = T.flow;
     T = j;
-    render();
+    // An expanded operation is a reading state. Replacing #app every two
+    // seconds restarts its animation and jumps the person out of the detail
+    // they clicked. Keep collecting fresh trace data, then render it once they
+    // close the detail (or take another action that renders the page).
+    if (forceRender || (!traceDetailOpen() && !S.graph)) render();
   }).catch(function () { /* next poll */ });
+}
+
+/** @returns {boolean} */
+function traceDetailOpen() {
+  var rows = S.xrow || {}, id;
+  for (id in rows) if (rows[id]) return true;
+  return false;
 }
 
 /** @param {string} sid */
 function openTrace(sid) {
-  S.sid = sid; T = null; S.toolsAll = false; S.cutAll = false; S.xrow = {};
+  S.sid = sid; T = null; S.toolsAll = false; S.cutAll = false; S.graph = false; S.xrow = {};
   render();      // the shell, with its loading note
-  pollTrace(sid);
+  pollTrace(sid, false);
 }
 
 /* ---------- retention ----------

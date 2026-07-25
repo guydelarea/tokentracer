@@ -275,6 +275,81 @@ func TestTraceUnknownSession(t *testing.T) {
 	}
 }
 
+func TestTraceFlowConnectsToolsResultsAndSubagents(t *testing.T) {
+	h, st, _ := newServer(t)
+	base := time.Now().Add(-time.Minute)
+	rootReq := []byte(`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"run the test suite"}]}`)
+	rootResp := []byte(`{"content":[{"type":"tool_use","id":"call-bash","name":"Bash","input":{"command":"go test ./..."}},{"type":"tool_use","id":"call-agent","name":"Task","input":{"prompt":"inspect trace renderer"}}]}`)
+	_, err := st.InsertExchange(store.Row{
+		TsMs: base.UnixMilli(), Endpoint: "POST /v1/messages", ModelReq: "claude-sonnet-5",
+		SessionID: "root", Label: "run the test suite", Status: 200,
+	}, rootReq, rootResp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The child has an authoritative parent_sid and the same opening prompt as
+	// the Task call above. That lets the flow attach it to the right call.
+	_, err = st.InsertExchange(store.Row{
+		TsMs: base.Add(time.Second).UnixMilli(), Endpoint: "POST /v1/messages", ModelReq: "claude-sonnet-5",
+		SessionID: "child", ParentSid: "root", Label: "inspect trace renderer", Status: 200,
+	}, []byte(`{"messages":[{"role":"user","content":"inspect trace renderer"}]}`), []byte(`{"content":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = st.InsertExchange(store.Row{
+		TsMs: base.Add(2 * time.Second).UnixMilli(), Endpoint: "POST /v1/messages", ModelReq: "claude-sonnet-5",
+		SessionID: "root", Label: "run the test suite", Status: 200,
+	}, []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-bash","content":"all tests passed"}]}]}`), []byte(`{"content":[{"type":"text","text":"done"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.InsertExchange(store.Row{
+		TsMs: base.Add(3 * time.Second).UnixMilli(), Endpoint: "POST /v1/messages", ModelReq: "claude-sonnet-5",
+		// The fact label still names the session opener. The flow must instead
+		// show the newest human message from this request's history.
+		SessionID: "root", Label: "run the test suite", Status: 200,
+	}, []byte(`{"messages":[{"role":"user","content":"run the test suite"},{"role":"assistant","content":"done"},{"role":"user","content":"fine how are you"}]}`), []byte(`{"content":[{"type":"text","text":"great"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var compact traceView
+	rec := get(t, h, "/api/trace?sid=root", "127.0.0.1:1234")
+	if err := json.Unmarshal(rec.Body.Bytes(), &compact); err != nil {
+		t.Fatal(err)
+	}
+	if len(compact.Flow) != 0 {
+		t.Fatalf("ordinary trace poll parsed flow = %+v", compact.Flow)
+	}
+
+	var got traceView
+	rec = get(t, h, "/api/trace?sid=root&flow=1", "127.0.0.1:1234")
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Flow) != 3 {
+		t.Fatalf("flow turns = %d, want 3", len(got.Flow))
+	}
+	first := got.Flow[0]
+	if !first.Captured || first.Ask != "run the test suite" || len(first.Calls) != 2 {
+		t.Fatalf("first flow turn = %+v", first)
+	}
+	if first.Calls[0].Name != "Bash" || first.Calls[0].Summary != "go test ./..." {
+		t.Errorf("bash call = %+v", first.Calls[0])
+	}
+	if first.Calls[1].Name != "Task" || !first.Calls[1].Spawn || first.Calls[1].AgentSid != "child" {
+		t.Errorf("subagent call = %+v", first.Calls[1])
+	}
+	if len(got.Flow[1].Results) != 1 || got.Flow[1].Results[0].Name != "Bash" || got.Flow[1].Results[0].Bytes == 0 {
+		t.Errorf("result hand-off = %+v", got.Flow[1].Results)
+	}
+	if got.Flow[2].Ask != "fine how are you" {
+		t.Errorf("latest graph prompt = %q, want the latest user text", got.Flow[2].Ask)
+	}
+}
+
 func TestCapture(t *testing.T) {
 	h, st, dbPath := newServer(t)
 

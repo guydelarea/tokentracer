@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -152,7 +153,8 @@ func (s *server) trace(w http.ResponseWriter, r *http.Request) {
 
 	// The subagents this session spawned. Fail-soft: a broken child query costs
 	// the trace its agents list, never the trace.
-	if kids, err := s.st.AgentRows(dbSid(sid)); err != nil {
+	var kids []store.Row
+	if kids, err = s.st.AgentRows(dbSid(sid)); err != nil {
 		log.Printf("tokentracer: agent rows for %q: %v", sid, err)
 	} else if len(kids) > 0 {
 		view.Agents = foldAgents(kids, s.rates, s.now())
@@ -165,9 +167,103 @@ func (s *server) trace(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Capture parsing is deliberately on demand: the normal two-second trace
+	// poll stays cheap until someone opens the session graph or an operation.
+	if r.URL.Query().Get("flow") == "1" {
+		view.Flow = s.flowOf(rows, s.childPrompts(kids, view.Agents))
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(view); err != nil {
 		log.Printf("tokentracer: encoding trace %q: %v", sid, err)
+	}
+}
+
+// childPrompts maps the exact opening prompt of each directly-linked child to
+// its summary. parent_sid establishes the relationship; this map identifies
+// which Task or Agent call in the parent created that known child.
+func (s *server) childPrompts(rows []store.Row, agents []agentRow) map[string][]agentRow {
+	bySID := make(map[string]agentRow, len(agents))
+	for _, a := range agents {
+		bySID[a.Sid] = a
+	}
+	out := map[string][]agentRow{}
+	seen := map[string]bool{}
+	for _, r := range rows {
+		if seen[r.SessionID] {
+			continue
+		}
+		seen[r.SessionID] = true
+		a, ok := bySID[r.SessionID]
+		if !ok {
+			continue
+		}
+		body, _, err := s.st.Capture(r.ID)
+		if err != nil {
+			continue
+		}
+		facts, err := anthropic.ParseRequest(body)
+		if err == nil && strings.TrimSpace(facts.FirstText) != "" {
+			key := strings.TrimSpace(facts.FirstText)
+			out[key] = append(out[key], a)
+		}
+	}
+	return out
+}
+
+func (s *server) flowOf(rows []store.Row, children map[string][]agentRow) []flowTurn {
+	out := make([]flowTurn, 0, len(rows))
+	called := map[string]string{}
+	for _, r := range rows {
+		turn := flowTurn{ID: r.ID, Time: time.UnixMilli(r.TsMs).Format(time.RFC3339), Ask: r.Label, Status: r.Status,
+			Calls: []flowCall{}, Results: []flowResult{}}
+		req, resp, err := s.st.Capture(r.ID)
+		if err != nil {
+			out = append(out, turn)
+			continue
+		}
+		turn.Captured = true
+		// Row.Label is intentionally the session opener. The graph needs the
+		// newest human text in this request's full conversation instead.
+		turn.Ask = anthropic.LatestUserText(req)
+		for _, result := range anthropic.ToolResults(req) {
+			name := called[result.ToolUseID]
+			if name == "" {
+				name = "earlier tool"
+			}
+			turn.Results = append(turn.Results, flowResult{ToolUseID: result.ToolUseID, Name: name, Bytes: result.Bytes})
+		}
+		for _, call := range flowCalls(resp) {
+			called[call.ID] = call.Name
+			turn.Calls = append(turn.Calls, call)
+		}
+		out = append(out, turn)
+	}
+	linkSubagents(out, children)
+	return out
+}
+
+// linkSubagents presents a Task/Agent → child edge only when the correlation is
+// unambiguous. ParentSid proves the child belongs to this session; a duplicate
+// prompt does not prove which identical Task invocation created it.
+func linkSubagents(turns []flowTurn, children map[string][]agentRow) {
+	calls := map[string][]*flowCall{}
+	for i := range turns {
+		for j := range turns[i].Calls {
+			call := &turns[i].Calls[j]
+			if call.Agent && call.prompt != "" {
+				calls[call.prompt] = append(calls[call.prompt], call)
+			}
+		}
+	}
+	for prompt, matches := range calls {
+		kids := children[prompt]
+		if len(matches) != 1 || len(kids) != 1 {
+			continue
+		}
+		matches[0].Spawn = true
+		matches[0].AgentSid = kids[0].Sid
+		matches[0].AgentLabel = kids[0].Label
 	}
 }
 

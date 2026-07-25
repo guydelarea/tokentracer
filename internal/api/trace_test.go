@@ -57,6 +57,21 @@ func TestFoldAgents(t *testing.T) {
 	}
 }
 
+func TestLinkSubagentsLeavesDuplicatePromptsUnlinked(t *testing.T) {
+	turns := []flowTurn{
+		{Calls: []flowCall{{Name: "Task", Agent: true, prompt: "same task"}}},
+		{Calls: []flowCall{{Name: "Task", Agent: true, prompt: "same task"}}},
+	}
+	children := map[string][]agentRow{"same task": {{Sid: "child-1"}, {Sid: "child-2"}}}
+
+	linkSubagents(turns, children)
+	for i, turn := range turns {
+		if turn.Calls[0].Spawn || turn.Calls[0].AgentSid != "" {
+			t.Errorf("duplicate task %d was linked as a definite spawn: %+v", i, turn.Calls[0])
+		}
+	}
+}
+
 // The claim the trace exists to make: this request broke the cache, and THIS is
 // what broke it. The prefix chain is cumulative over tools → system → messages,
 // so the first index at which two requests diverge is not a hint about the cause
