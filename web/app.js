@@ -392,7 +392,7 @@ var T = null;
  * reset whenever a new request is opened. `xrow` is the same idea for the trace
  * list's unfolded rows, keyed by request id so it survives the 2s re-render.
  * @type {{sid: string|null, id: number|null, tab: string, toolsAll: boolean, cutAll: boolean, open: Record<string, boolean|undefined>, rawSide: string, xrow: Record<number, boolean|undefined>}} */
-var S = { sid: null, id: null, tab: 'request', toolsAll: false, cutAll: false, open: {}, rawSide: 'request', xrow: {} };
+var S = { sid: null, id: null, tab: 'request', toolsAll: false, cutAll: false, graph: false, open: {}, rawSide: 'request', xrow: {} };
 
 var PV = /** @type {Record<string, number|undefined>} */ ({}), PVT = /** @type {Record<string, number|undefined>} */ ({});
 /** @type {captureView|null} */
@@ -740,6 +740,7 @@ function renderTrace() {
     '<span style="color:' + (t.live ? MRD : '#6f6f6f') + '">' + (t.live ? 'live' : 'idle ' + esc(t.idle)) + '</span></div>';
 
   h += traceStats(t);
+  h += sessionGraph(t);
   h += agentsPanel(t);
   h += insightCards(t);
   h += contextChart(t);
@@ -750,6 +751,43 @@ function renderTrace() {
   h += traceList(t);
 
   return h + '</div>';
+}
+
+/* ---------- session graph ----------
+   A context-style overview of the whole conversation. It is intentionally
+   collapsed: a person scans the graph first, then opens only the turn whose
+   operation flow they need to read. */
+/** @param {traceView} t @returns {string} */
+function sessionGraph(t) {
+  var F = t.flow || [], i, j;
+  if (!F.length) return '';
+
+  var h = '<div class="graph-toggle"><button type="button" id="flowgraph" aria-expanded="' + (S.graph ? 'true' : 'false') + '">' +
+    (S.graph ? '▾ hide session graph' : '▸ show session graph') + '</button><span class="note">' + F.length +
+    (F.length === 1 ? ' operation' : ' operations') + ' · prompts, tool calls, results, subagents</span></div>';
+  if (!S.graph) return h;
+
+  h += '<section class="flow-graph" aria-label="Session execution graph"><div class="flow-graph-track">';
+  for (i = 0; i < F.length; i++) {
+    var turn = F[i], calls = turn.calls || [], results = turn.results || [];
+    h += '<button type="button" class="flow-graph-node' + (turn.status >= 400 ? ' err' : '') + '" data-graph-id="' + esc(turn.id) + '">' +
+      '<span class="flow-graph-head"><span>' + (i + 1) + '</span><time>' + esc(clock(tms(turn.time))) + '</time></span>' +
+      '<strong title="' + esc(turn.ask || 'assistant turn') + '">' + esc(trunc(turn.ask || 'assistant turn', 48)) + '</strong>';
+    if (results.length) {
+      h += '<span class="flow-graph-results">';
+      for (j = 0; j < results.length; j++) h += '<i>← ' + esc(results[j].name) + '</i>';
+      h += '</span>';
+    }
+    if (calls.length) {
+      h += '<span class="flow-graph-calls">';
+      for (j = 0; j < calls.length; j++) h += '<i class="' + (calls[j].spawn ? 'spawn' : '') + '">→ ' + esc(calls[j].name) + '</i>';
+      h += '</span>';
+    } else {
+      h += '<span class="flow-graph-reply">reply</span>';
+    }
+    h += '</button>';
+  }
+  return h + '</div><div class="flow-graph-note">click an operation to open its causal detail in the trace below</div></section>';
 }
 
 /* ---------- causal operation flow ----------
@@ -1870,12 +1908,22 @@ function wire() {
   if (ca) /** @type {HTMLElement} */ (ca).onclick = function () { S.cutAll = !S.cutAll; render(); };
   var ta = document.querySelector('#app #toolsall');
   if (ta) /** @type {HTMLElement} */ (ta).onclick = function () { S.toolsAll = !S.toolsAll; render(); };
+  var fg = document.querySelector('#flowgraph');
+  if (fg) /** @type {HTMLElement} */ (fg).onclick = function () { S.graph = !S.graph; render(); };
 
   // trace rows unfold in place; the bodies live one click further, in the inspector
   els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-id]'));
   for (i = 0; i < els.length; i++) els[i].onclick = (function (id) {
     return function () { hideTip(); S.xrow[id] = !S.xrow[id]; render(); };
   })(Number(els[i].getAttribute('data-id')));
+  els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-graph-id]'));
+  for (i = 0; i < els.length; i++) els[i].onclick = (function (id) {
+    return function () {
+      S.graph = false; S.xrow[id] = true; render();
+      var row = document.querySelector('[data-id="' + id + '"]');
+      if (row) row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    };
+  })(Number(els[i].getAttribute('data-graph-id')));
   els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-insp]'));
   for (i = 0; i < els.length; i++) els[i].onclick = (function (id) {
     return function () { hideTip(); openInsp(id); };
@@ -1986,13 +2034,24 @@ function pollTrace(sid) {
     if (S.sid !== sid) return; // they navigated away while it was in flight
     if (!j) { S.sid = null; T = null; render(); return; }
     T = j;
-    render();
+    // An expanded operation is a reading state. Replacing #app every two
+    // seconds restarts its animation and jumps the person out of the detail
+    // they clicked. Keep collecting fresh trace data, then render it once they
+    // close the detail (or take another action that renders the page).
+    if (!traceDetailOpen() && !S.graph) render();
   }).catch(function () { /* next poll */ });
+}
+
+/** @returns {boolean} */
+function traceDetailOpen() {
+  var rows = S.xrow || {}, id;
+  for (id in rows) if (rows[id]) return true;
+  return false;
 }
 
 /** @param {string} sid */
 function openTrace(sid) {
-  S.sid = sid; T = null; S.toolsAll = false; S.cutAll = false; S.xrow = {};
+  S.sid = sid; T = null; S.toolsAll = false; S.cutAll = false; S.graph = false; S.xrow = {};
   render();      // the shell, with its loading note
   pollTrace(sid);
 }
