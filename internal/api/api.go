@@ -222,6 +222,11 @@ func (s *server) flowOf(rows []store.Row, children map[string][]agentRow) []flow
 			continue
 		}
 		turn.Captured = true
+		// Row.Label is intentionally the session opener. The graph needs the
+		// newest human text in this request's full conversation instead.
+		if ask := anthropic.LatestUserText(req); ask != "" {
+			turn.Ask = ask
+		}
 		for _, result := range anthropic.ToolResults(req) {
 			name := called[result.ToolUseID]
 			if name == "" {

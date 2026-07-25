@@ -192,6 +192,27 @@ func firstText(msgs []json.RawMessage) string {
 	return ""
 }
 
+// LatestUserText returns the newest human-authored text in a captured request.
+// A request carries the whole conversation, so this is the prompt that belongs
+// to THIS exchange; FirstText is deliberately different and remains the stable
+// label used to name the session.
+func LatestUserText(body []byte) string {
+	var req request
+	if json.Unmarshal(body, &req) != nil {
+		return ""
+	}
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		var m message
+		if json.Unmarshal(req.Messages[i], &m) != nil || m.Role != "user" {
+			continue
+		}
+		if txt := firstUserText(m.Content); txt != "" {
+			return txt
+		}
+	}
+	return ""
+}
+
 // firstUserText pulls the first human-authored text out of a content section in
 // either of the two forms the API accepts.
 func firstUserText(content json.RawMessage) string {

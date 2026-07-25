@@ -102,6 +102,17 @@ func TestParseRequestContentForms(t *testing.T) {
 	}
 }
 
+func TestLatestUserTextUsesTheCurrentPromptNotTheSessionOpening(t *testing.T) {
+	body := []byte(`{"messages":[
+	  {"role":"user","content":"hello team"},
+	  {"role":"assistant","content":"Hello! What are we working on?"},
+	  {"role":"user","content":"fine how are you"}
+	]}`)
+	if got := LatestUserText(body); got != "fine how are you" {
+		t.Errorf("LatestUserText = %q, want the latest human prompt", got)
+	}
+}
+
 func TestParseRequestLabelEdgeCases(t *testing.T) {
 	tests := []struct {
 		name string

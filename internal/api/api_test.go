@@ -305,14 +305,23 @@ func TestTraceFlowConnectsToolsResultsAndSubagents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, err = st.InsertExchange(store.Row{
+		TsMs: base.Add(3 * time.Second).UnixMilli(), Endpoint: "POST /v1/messages", ModelReq: "claude-sonnet-5",
+		// The fact label still names the session opener. The flow must instead
+		// show the newest human message from this request's history.
+		SessionID: "root", Label: "run the test suite", Status: 200,
+	}, []byte(`{"messages":[{"role":"user","content":"run the test suite"},{"role":"assistant","content":"done"},{"role":"user","content":"fine how are you"}]}`), []byte(`{"content":[{"type":"text","text":"great"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var got traceView
 	rec := get(t, h, "/api/trace?sid=root", "127.0.0.1:1234")
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Flow) != 2 {
-		t.Fatalf("flow turns = %d, want 2", len(got.Flow))
+	if len(got.Flow) != 3 {
+		t.Fatalf("flow turns = %d, want 3", len(got.Flow))
 	}
 	first := got.Flow[0]
 	if !first.Captured || first.Ask != "run the test suite" || len(first.Calls) != 2 {
@@ -326,6 +335,9 @@ func TestTraceFlowConnectsToolsResultsAndSubagents(t *testing.T) {
 	}
 	if len(got.Flow[1].Results) != 1 || got.Flow[1].Results[0].Name != "Bash" || got.Flow[1].Results[0].Bytes == 0 {
 		t.Errorf("result hand-off = %+v", got.Flow[1].Results)
+	}
+	if got.Flow[2].Ask != "fine how are you" {
+		t.Errorf("latest graph prompt = %q, want the latest user text", got.Flow[2].Ask)
 	}
 }
 
