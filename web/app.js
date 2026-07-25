@@ -535,23 +535,7 @@ function renderHome() {
   var win = ov.windowMin || 10; // the server owns the window; 10 min is the default
   var winCap = 'last ' + win + ' min';
 
-  /* Burn is a RATE — dollars per hour, extrapolated from the window — and it is
-     the biggest number on the page, so it is the one most likely to be misread as
-     a bill. The subtitle carries the actual total for exactly that reason.
-
-     Below one window of history the server floors burnAvg at the window, which
-     pins it to burnNow and forces the ratio to 1. Every trend branch here would
-     then land on "steady" — the calmest thing the page can say, said precisely
-     when it knows least. So a cold start does not get a trend. It gets told it is
-     a cold start. */
-  var burnNow = ov.burnNow || 0, burnAvg = ov.burnAvg || 0;
-  var ratio = burnAvg > 0 ? burnNow / burnAvg : 1, burnSub;
-  if (!D.traced) burnSub = 'no requests recorded yet';
-  else if (ov.coldStart) burnSub = 'cold start · ' + fM(D.cost, 2) + ' total so far · too little history for a trend';
-  else if (ratio > 1.35) burnSub = '▲ ' + ratio.toFixed(1) + '× the average of ' + fM(burnAvg, 2) + '/hr · ' + fM(D.cost, 2) + ' total';
-  else if (ratio < 0.7) burnSub = '▾ below the ' + fM(burnAvg, 2) + '/hr average · ' + fM(D.cost, 2) + ' total';
-  else burnSub = 'steady · avg ' + fM(burnAvg, 2) + '/hr · ' + fM(D.cost, 2) + ' total';
-  if (D.traced) burnSub = fM(ov.todayCost || 0, 2) + ' today · ' + burnSub;
+  var burnAvg = ov.burnAvg || 0;
 
   /* Could have saved: schemas that ship on every request and are never called,
      priced at the cadence the live sessions are actually running at. The only
@@ -571,10 +555,9 @@ function renderHome() {
   var reqSub = winReqs + (winReqs === 1 ? ' request' : ' requests') + ' in the ' + winCap + ' · ' + fM(ov.avgReq || 0, 4) + ' avg';
 
   var h = '<div class="wrap" style="padding-top:36px;padding-bottom:72px"><div class="tiles">';
-  h += '<div><div class="cap">Burn rate · ' + esc(winCap) + '</div>' +
-    '<div class="val" style="gap:8px"><span class="big" style="animation:' + anim('burn', burnNow) + '">' + fM(burnNow, 2) + '</span>' +
-    '<span class="unit" style="font-size:15px">/hr</span></div>' +
-    '<div class="tile-sub" style="margin-top:13px;font-size:11.5px">' + esc(burnSub) + '</div></div>';
+  h += '<div><div class="cap">Today\'s total spend</div>' +
+    '<div class="val" style="gap:8px"><span class="big" style="animation:' + anim('today-spend', ov.todayCost || 0) + '">' + fM(ov.todayCost || 0, 2) + '</span></div>' +
+    '<div class="tile-sub" style="margin-top:13px;font-size:11.5px">priced requests since local midnight</div></div>';
 
   h += '<div class="tile' + (worst ? ' click" id="wasteopen' : '') + '" style="padding-top:5px" title="open the cut list">' +
     '<div class="cap">Could have saved</div>' +
@@ -628,7 +611,7 @@ function sessionOf(sid) {
    The front page. A request is not a thing anyone did; a session is. */
 /** @returns {string} */
 function sessionTable() {
-  var R = D.sessions || [], i;
+  var R = D.sessions || [], i, day, lastDay = '';
 
   var h = '<div style="margin-top:50px"><div class="hdrline">' +
     '<div class="cap">Sessions <span class="sub">· click one to trace it</span></div>' +
@@ -643,8 +626,29 @@ function sessionTable() {
     return h + '<div class="empty">No sessions yet. Point your client at ' + at + ' — the first one lands here within two seconds.</div></div>';
   }
 
-  for (i = 0; i < R.length; i++) h += sessionRowHtml(R[i]);
+  for (i = 0; i < R.length; i++) {
+    day = sessionDay(R[i].last);
+    if (day.key !== lastDay) {
+      h += '<div class="sday"><span>' + esc(day.label) + '</span><i></i></div>';
+      lastDay = day.key;
+    }
+    h += sessionRowHtml(R[i]);
+  }
   return h + '</div>';
+}
+
+/** @param {string} last @returns {{key:string,label:string}} */
+function sessionDay(last) {
+  var at = new Date(last), now = new Date();
+  if (isNaN(at.getTime())) return { key: 'unknown', label: 'Unknown date' };
+
+  var key = at.getFullYear() + '-' + at.getMonth() + '-' + at.getDate();
+  var today = now.getFullYear() + '-' + now.getMonth() + '-' + now.getDate();
+  now.setDate(now.getDate() - 1);
+  var yesterday = now.getFullYear() + '-' + now.getMonth() + '-' + now.getDate();
+  if (key === today) return { key: key, label: 'Today' };
+  if (key === yesterday) return { key: key, label: 'Yesterday' };
+  return { key: key, label: at.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' }) };
 }
 
 /** @param {sessionRow} s @returns {string} */
