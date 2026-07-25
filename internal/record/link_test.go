@@ -112,3 +112,71 @@ func TestLinkerEvictsOldestSpawns(t *testing.T) {
 		t.Error("newest spawn was evicted")
 	}
 }
+
+// childExchange is msgExchange with the parent the client itself names. Claude
+// Code puts parent_session_id in the same metadata.user_id blob as session_id.
+func childExchange(sid, parent, firstText, respJSON string) Exchange {
+	ex := msgExchange(sid, firstText, respJSON)
+	userID := fmt.Sprintf(`{"session_id":%q,"parent_session_id":%q}`, sid, parent)
+	ex.ReqBody = []byte(fmt.Sprintf(`{"model":"claude-opus-4-8","max_tokens":4096,`+
+		`"metadata":{"user_id":%q},`+
+		`"messages":[{"role":"user","content":%q}]}`, userID, firstText))
+	return ex
+}
+
+// The link the client hands us, which the prompt match cannot reproduce. The
+// child's opening message is the spawn prompt wrapped in an envelope — the real
+// client's shape — so the hashes disagree and the fallback finds nothing. Only
+// reading parent_session_id links these two, and this is the case the dashboard
+// showing one row per session actually depends on.
+func TestStatedParentLinksWhenThePromptDoesNotMatch(t *testing.T) {
+	r, st := newRecorder(t)
+
+	const prompt = "scan the repo for flaky tests"
+	wrapped := "<teammate-message teammate_id=\"team-lead\">\n" + prompt + "\n</teammate-message>"
+
+	r.Record(msgExchange("parent-1", "refactor the billing tests", spawnReply("Task", prompt)))
+	r.Record(childExchange("child-1", "parent-1", wrapped, endTurn("found none")))
+
+	rows := rowsOf(t, r, st)
+	for _, row := range rows {
+		if row.SessionID == "child-1" && row.ParentSid != "parent-1" {
+			t.Errorf("child ParentSid = %q, want parent-1 — the stated parent was ignored", row.ParentSid)
+		}
+	}
+}
+
+// A client that names itself as its own parent must not be folded into its own
+// row: that would count its spend twice and make the session its own subagent.
+func TestStatedParentIgnoresSelfParenthood(t *testing.T) {
+	r, st := newRecorder(t)
+	r.Record(childExchange("solo-1", "solo-1", "hello there", endTurn("hi")))
+
+	rows := rowsOf(t, r, st)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if rows[0].ParentSid != "" {
+		t.Errorf("ParentSid = %q, want empty", rows[0].ParentSid)
+	}
+}
+
+// The stated parent takes precedence, but it must not switch off the fallback
+// for everyone else: a stated child whose own reply spawns a grandchild still
+// registers that prompt, so a client that names no parent still links.
+func TestStatedParentStillRegistersItsOwnSpawns(t *testing.T) {
+	r, st := newRecorder(t)
+
+	r.Record(msgExchange("parent-1", "top level work", spawnReply("Task", "middle task")))
+	// The middle session names its parent AND spawns a grandchild of its own.
+	r.Record(childExchange("child-1", "parent-1", "middle task", spawnReply("Task", "leaf task")))
+	// The grandchild names no parent — only the prompt match can place it.
+	r.Record(msgExchange("grand-1", "leaf task", endTurn("done")))
+
+	want := map[string]string{"parent-1": "", "child-1": "parent-1", "grand-1": "child-1"}
+	for _, row := range rowsOf(t, r, st) {
+		if w, ok := want[row.SessionID]; ok && row.ParentSid != w {
+			t.Errorf("%s ParentSid = %q, want %q", row.SessionID, row.ParentSid, w)
+		}
+	}
+}

@@ -31,6 +31,12 @@ import (
 type RequestFacts struct {
 	Model     string // "" when the body named none — Vertex puts it in the URL instead
 	SessionID string // "" when the client sent no recognizable session id
+
+	// ParentSessionID is the session that spawned this one, as the client itself
+	// reported it. "" when the client sent none, which is what a top-level session
+	// looks like — and also what an older client looks like.
+	ParentSessionID string
+
 	Stream    bool
 	Turns     int
 	ToolCount int
@@ -86,7 +92,15 @@ type tool struct {
 }
 
 // Claude Code packs a JSON document into the metadata.user_id *string*.
-var sessionRe = regexp.MustCompile(`"session_id"\s*:\s*"([^"]+)"`)
+//
+// It carries the parent session too, so a subagent's link to the session that
+// spawned it is a fact on the wire — not something to infer. sessionRe cannot
+// match parent_session_id by accident: it anchors on the opening quote, and the
+// character before "session_id" inside "parent_session_id" is an underscore.
+var (
+	sessionRe       = regexp.MustCompile(`"session_id"\s*:\s*"([^"]+)"`)
+	parentSessionRe = regexp.MustCompile(`"parent_session_id"\s*:\s*"([^"]+)"`)
+)
 
 // Vertex spells a Messages call as .../publishers/anthropic/models/<model>:streamRawPredict
 // (or :rawPredict when not streaming) and puts the model in the URL, not the body.
@@ -121,6 +135,9 @@ func ParseRequest(body []byte) (RequestFacts, error) {
 	}
 	if m := sessionRe.FindStringSubmatch(req.Metadata.UserID); m != nil {
 		f.SessionID = m[1]
+	}
+	if m := parentSessionRe.FindStringSubmatch(req.Metadata.UserID); m != nil {
+		f.ParentSessionID = m[1]
 	}
 
 	for _, t := range req.Tools {

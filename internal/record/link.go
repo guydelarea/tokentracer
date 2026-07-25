@@ -7,12 +7,23 @@ import (
 	"github.com/guydelarea/tokentracer/internal/store"
 )
 
-// A subagent runs as its own API session, and nothing on the wire names its
-// parent. The one thread between the two is the prompt: the parent's reply
-// carries a Task/Agent tool_use block whose "prompt" field becomes, verbatim,
-// the child session's first user message. The linker holds recently-seen spawn
-// prompts just long enough to recognize the child when it arrives, and stamps
-// the match onto the row as the parent_sid fact.
+// Where a subagent's parent comes from, in order of preference.
+//
+// Claude Code names it outright: metadata.user_id carries parent_session_id
+// beside session_id, and buildRequest reads it straight onto the row. That is a
+// fact, and it beats everything below — no expiry, no restart to survive, no
+// text to agree on.
+//
+// The prompt match is the fallback for clients that send no parent. The one
+// thread between parent and child is then the prompt: the parent's reply carries
+// a Task/Agent tool_use block whose "prompt" field becomes the child session's
+// first user message. The linker holds recently-seen spawn prompts just long
+// enough to recognize the child when it arrives.
+//
+// It is a genuine fallback, not a backstop — the client wraps prompts in
+// envelopes before sending them, so the two sides frequently do not agree
+// character-for-character and no match forms. That is survivable precisely
+// because the stated parent covers the case that matters.
 //
 // The recorder's single worker means the order is guaranteed: a parent's
 // exchange finishes (and is recorded) before the child it spawned finishes its
@@ -48,6 +59,16 @@ func newLinker() *linker {
 func (l *linker) apply(row *store.Row, li linkInfo) {
 	sid := row.SessionID
 	if sid == "" {
+		return
+	}
+
+	// The client already told us, so there is nothing to guess. Still register the
+	// spawns below: this row's reply may name children whose own clients don't.
+	if row.ParentSid != "" {
+		l.remember(sid, row.ParentSid)
+		for _, prompt := range li.spawned {
+			l.spawn(promptKey(prompt), sid)
+		}
 		return
 	}
 

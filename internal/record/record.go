@@ -194,6 +194,11 @@ func buildRequest(row *store.Row, ex Exchange, best *int, li *linkInfo) {
 		row.ModelReq = facts.Model
 	}
 	row.SessionID = facts.SessionID
+	// The client names its own parent. A session that claims itself is dropped:
+	// self-parenthood would fold a session into its own row and double its spend.
+	if facts.ParentSessionID != facts.SessionID {
+		row.ParentSid = facts.ParentSessionID
+	}
 	row.Label = facts.Label
 	li.firstText = facts.FirstText
 	row.Turns = int64(facts.Turns)
