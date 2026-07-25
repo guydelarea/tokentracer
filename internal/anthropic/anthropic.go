@@ -201,16 +201,25 @@ func LatestUserText(body []byte) string {
 	if json.Unmarshal(body, &req) != nil {
 		return ""
 	}
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		var m message
-		if json.Unmarshal(req.Messages[i], &m) != nil || m.Role != "user" {
-			continue
-		}
-		if txt := firstUserText(m.Content); txt != "" {
-			return txt
-		}
+	m, ok := latestMessage(req.Messages)
+	if !ok || m.Role != "user" {
+		return ""
 	}
-	return ""
+	return firstUserText(m.Content)
+}
+
+// latestMessage is the current hand-off in a request that carries a cumulative
+// conversation. Looking farther back would turn a tool-result continuation
+// into a fake repeat of the user prompt that preceded it.
+func latestMessage(msgs []json.RawMessage) (message, bool) {
+	if len(msgs) == 0 {
+		return message{}, false
+	}
+	var m message
+	if json.Unmarshal(msgs[len(msgs)-1], &m) != nil {
+		return message{}, false
+	}
+	return m, true
 }
 
 // firstUserText pulls the first human-authored text out of a content section in

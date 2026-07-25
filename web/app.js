@@ -258,6 +258,7 @@
  * @property {string} [id]
  * @property {string} name
  * @property {string} [summary]
+ * @property {boolean} [agent]
  * @property {boolean} [spawn]
  * @property {string} [agentSid]
  * @property {string} [agentLabel]
@@ -759,13 +760,14 @@ function renderTrace() {
    operation flow they need to read. */
 /** @param {traceView} t @returns {string} */
 function sessionGraph(t) {
-  var F = t.flow || [], i, j;
-  if (!F.length) return '';
+  var F = t.flow || [], i, j, n = (t.rows || []).length;
+  if (!n) return '';
 
   var h = '<div class="graph-toggle"><button type="button" id="flowgraph" aria-expanded="' + (S.graph ? 'true' : 'false') + '">' +
-    (S.graph ? '▾ hide session graph' : '▸ show session graph') + '</button><span class="note">' + F.length +
-    (F.length === 1 ? ' operation' : ' operations') + ' · prompts, tool calls, results, subagents</span></div>';
+    (S.graph ? '▾ hide session graph' : '▸ show session graph') + '</button><span class="note">' + n +
+    (n === 1 ? ' operation' : ' operations') + ' · prompts, tool calls, results, subagents</span></div>';
   if (!S.graph) return h;
+  if (!F.length) return h + '<div class="flow-graph"><div class="flow-graph-note">loading capture-backed session graph…</div></div>';
 
   h += '<section class="flow-graph" aria-label="Session execution graph"><div class="flow-graph-track">';
   for (i = 0; i < F.length; i++) {
@@ -780,7 +782,7 @@ function sessionGraph(t) {
     }
     if (calls.length) {
       h += '<span class="flow-graph-calls">';
-      for (j = 0; j < calls.length; j++) h += '<i class="' + (calls[j].spawn ? 'spawn' : '') + '">→ ' + esc(calls[j].name) + '</i>';
+      for (j = 0; j < calls.length; j++) h += '<i class="' + (calls[j].spawn ? 'spawn' : (calls[j].agent ? 'agent' : '')) + '">→ ' + esc(calls[j].name) + '</i>';
       h += '</span>';
     } else {
       h += '<span class="flow-graph-reply">reply</span>';
@@ -824,7 +826,7 @@ function operationFlow(t, id) {
   if (turn.calls && turn.calls.length) {
     h += '<div class="flow-calls">';
     for (j = 0; j < turn.calls.length; j++) {
-      var call = turn.calls[j], kind = call.spawn ? 'SPAWN' : 'TOOL';
+      var call = turn.calls[j], kind = call.spawn ? 'SPAWN' : (call.agent ? 'AGENT CALL' : 'TOOL');
       h += '<div class="flow-call' + (call.spawn ? ' spawn' : '') + '"><span class="flow-arrow">↳</span>' +
         '<span class="flow-kind">' + kind + '</span><span class="m flow-name">' + esc(call.name) + '</span>' +
         (call.summary ? '<span class="flow-detail" title="' + esc(call.summary) + '">' + esc(call.summary) + '</span>' : '') +
@@ -1909,17 +1911,27 @@ function wire() {
   var ta = document.querySelector('#app #toolsall');
   if (ta) /** @type {HTMLElement} */ (ta).onclick = function () { S.toolsAll = !S.toolsAll; render(); };
   var fg = document.querySelector('#flowgraph');
-  if (fg) /** @type {HTMLElement} */ (fg).onclick = function () { S.graph = !S.graph; render(); };
+  if (fg) /** @type {HTMLElement} */ (fg).onclick = function () {
+    S.graph = !S.graph;
+    render();
+    if (S.graph && S.sid) pollTrace(S.sid, true, true);
+  };
 
   // trace rows unfold in place; the bodies live one click further, in the inspector
   els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-id]'));
   for (i = 0; i < els.length; i++) els[i].onclick = (function (id) {
-    return function () { hideTip(); S.xrow[id] = !S.xrow[id]; render(); };
+    return function () {
+      hideTip();
+      S.xrow[id] = !S.xrow[id];
+      render();
+      if (S.xrow[id] && S.sid) pollTrace(S.sid, true, true);
+    };
   })(Number(els[i].getAttribute('data-id')));
   els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-graph-id]'));
   for (i = 0; i < els.length; i++) els[i].onclick = (function (id) {
     return function () {
       S.graph = false; S.xrow[id] = true; render();
+      if (S.sid) pollTrace(S.sid, true, true);
       var row = document.querySelector('[data-id="' + id + '"]');
       if (row) row.scrollIntoView({ block: 'center', behavior: 'smooth' });
     };
@@ -2022,23 +2034,27 @@ function poll() {
     // snaps it back under the cursor.
     var ret = /** @type {HTMLSelectElement} */ ($('#ret'));
     if (document.activeElement !== ret) ret.value = store.retention || 'off';
-    if (S.sid) pollTrace(S.sid); else render();
+    if (S.sid) pollTrace(S.sid, false); else render();
   }).catch(function () { /* the server is restarting; the next poll picks it up */ });
 }
 
-/** @param {string} sid */
-function pollTrace(sid) {
-  fetch('/api/trace?sid=' + encodeURIComponent(sid)).then(function (r) {
+/** @param {string} sid @param {boolean} flow @param {boolean} [forceRender] */
+function pollTrace(sid, flow, forceRender) {
+  var target = '/api/trace?sid=' + encodeURIComponent(sid) + (flow ? '&flow=1' : '');
+  fetch(target).then(function (r) {
     return r.ok ? r.json() : null;
   }).then(/** @param {traceView|null} j */ function (j) {
     if (S.sid !== sid) return; // they navigated away while it was in flight
     if (!j) { S.sid = null; T = null; render(); return; }
+    // A lightweight poll must not discard flow that an explicit, on-demand
+    // request just loaded for the graph or an expanded operation.
+    if (!flow && T && T.flow) j.flow = T.flow;
     T = j;
     // An expanded operation is a reading state. Replacing #app every two
     // seconds restarts its animation and jumps the person out of the detail
     // they clicked. Keep collecting fresh trace data, then render it once they
     // close the detail (or take another action that renders the page).
-    if (!traceDetailOpen() && !S.graph) render();
+    if (forceRender || (!traceDetailOpen() && !S.graph)) render();
   }).catch(function () { /* next poll */ });
 }
 
@@ -2053,7 +2069,7 @@ function traceDetailOpen() {
 function openTrace(sid) {
   S.sid = sid; T = null; S.toolsAll = false; S.cutAll = false; S.graph = false; S.xrow = {};
   render();      // the shell, with its loading note
-  pollTrace(sid);
+  pollTrace(sid, false);
 }
 
 /* ---------- retention ----------

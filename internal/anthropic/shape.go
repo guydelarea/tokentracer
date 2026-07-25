@@ -212,29 +212,27 @@ func ResultsInContext(body []byte) []ResultItem {
 	return out
 }
 
-// ToolResults returns every tool result carried by one request. Unlike
-// ResultsInContext it keeps individual hand-offs for the session-flow view.
+// ToolResults returns the tool results in a request's current hand-off. A
+// captured request contains cumulative history, so walking every message would
+// replay old results on every later session-graph node.
 func ToolResults(body []byte) []ToolResultRef {
 	var req request
 	if json.Unmarshal(body, &req) != nil {
 		return nil
 	}
-
+	m, ok := latestMessage(req.Messages)
+	if !ok || m.Role != "user" || !isArray(m.Content) {
+		return nil
+	}
+	var blocks []json.RawMessage
+	if json.Unmarshal(m.Content, &blocks) != nil {
+		return nil
+	}
 	var out []ToolResultRef
-	for _, raw := range req.Messages {
-		var m message
-		if json.Unmarshal(raw, &m) != nil || !isArray(m.Content) {
-			continue
-		}
-		var blocks []json.RawMessage
-		if json.Unmarshal(m.Content, &blocks) != nil {
-			continue
-		}
-		for _, b := range blocks {
-			var rb resultBlock
-			if json.Unmarshal(b, &rb) == nil && rb.Type == "tool_result" {
-				out = append(out, ToolResultRef{ToolUseID: rb.ToolUseID, Bytes: len(b)})
-			}
+	for _, b := range blocks {
+		var rb resultBlock
+		if json.Unmarshal(b, &rb) == nil && rb.Type == "tool_result" {
+			out = append(out, ToolResultRef{ToolUseID: rb.ToolUseID, Bytes: len(b)})
 		}
 	}
 	return out

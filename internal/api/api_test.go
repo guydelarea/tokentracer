@@ -315,8 +315,17 @@ func TestTraceFlowConnectsToolsResultsAndSubagents(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var got traceView
+	var compact traceView
 	rec := get(t, h, "/api/trace?sid=root", "127.0.0.1:1234")
+	if err := json.Unmarshal(rec.Body.Bytes(), &compact); err != nil {
+		t.Fatal(err)
+	}
+	if len(compact.Flow) != 0 {
+		t.Fatalf("ordinary trace poll parsed flow = %+v", compact.Flow)
+	}
+
+	var got traceView
+	rec = get(t, h, "/api/trace?sid=root&flow=1", "127.0.0.1:1234")
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}

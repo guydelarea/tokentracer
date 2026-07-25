@@ -230,9 +230,11 @@ type flowCall struct {
 	ID         string `json:"id,omitempty"`
 	Name       string `json:"name"`
 	Summary    string `json:"summary,omitempty"`
+	Agent      bool   `json:"agent,omitempty"`
 	Spawn      bool   `json:"spawn,omitempty"`
 	AgentSid   string `json:"agentSid,omitempty"`
 	AgentLabel string `json:"agentLabel,omitempty"`
+	prompt     string
 }
 
 type flowResult struct {
@@ -274,8 +276,8 @@ func flowCalls(body []byte) []flowCall {
 		if b.Type != "tool_use" || b.Name == "" {
 			continue
 		}
-		summary, _ := flowInput(b.Input)
-		out = append(out, flowCall{ID: b.ID, Name: b.Name, Summary: summary, Spawn: b.Name == "Task" || b.Name == "Agent"})
+		summary, prompt := flowInput(b.Input)
+		out = append(out, flowCall{ID: b.ID, Name: b.Name, Summary: summary, Agent: b.Name == "Task" || b.Name == "Agent", prompt: prompt})
 	}
 	return out
 }

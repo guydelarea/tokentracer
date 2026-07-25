@@ -113,6 +113,34 @@ func TestLatestUserTextUsesTheCurrentPromptNotTheSessionOpening(t *testing.T) {
 	}
 }
 
+func TestCurrentHandOffDoesNotReplayHistoricToolResults(t *testing.T) {
+	continuation := []byte(`{"messages":[
+	  {"role":"user","content":"hello team"},
+	  {"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"Bash"}]},
+	  {"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"ok"}]}
+	]}`)
+	if got := LatestUserText(continuation); got != "" {
+		t.Errorf("LatestUserText on a tool continuation = %q, want empty", got)
+	}
+	if got := ToolResults(continuation); len(got) != 1 || got[0].ToolUseID != "call-1" {
+		t.Errorf("ToolResults continuation = %+v, want only call-1", got)
+	}
+
+	nextPrompt := []byte(`{"messages":[
+	  {"role":"user","content":"hello team"},
+	  {"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"Bash"}]},
+	  {"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"ok"}]},
+	  {"role":"assistant","content":"done"},
+	  {"role":"user","content":"fine how are you"}
+	]}`)
+	if got := LatestUserText(nextPrompt); got != "fine how are you" {
+		t.Errorf("LatestUserText next prompt = %q", got)
+	}
+	if got := ToolResults(nextPrompt); len(got) != 0 {
+		t.Errorf("ToolResults replayed history = %+v, want none", got)
+	}
+}
+
 func TestParseRequestLabelEdgeCases(t *testing.T) {
 	tests := []struct {
 		name string

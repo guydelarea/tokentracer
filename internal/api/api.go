@@ -167,10 +167,11 @@ func (s *server) trace(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Every capture contains the full assistant response, including every
-	// tool_use block. Read them in order so the dashboard can tell the causal
-	// story instead of only reporting the first operation in each response.
-	view.Flow = s.flowOf(rows, s.childPrompts(kids, view.Agents))
+	// Capture parsing is deliberately on demand: the normal two-second trace
+	// poll stays cheap until someone opens the session graph or an operation.
+	if r.URL.Query().Get("flow") == "1" {
+		view.Flow = s.flowOf(rows, s.childPrompts(kids, view.Agents))
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(view); err != nil {
@@ -224,9 +225,7 @@ func (s *server) flowOf(rows []store.Row, children map[string][]agentRow) []flow
 		turn.Captured = true
 		// Row.Label is intentionally the session opener. The graph needs the
 		// newest human text in this request's full conversation instead.
-		if ask := anthropic.LatestUserText(req); ask != "" {
-			turn.Ask = ask
-		}
+		turn.Ask = anthropic.LatestUserText(req)
 		for _, result := range anthropic.ToolResults(req) {
 			name := called[result.ToolUseID]
 			if name == "" {
@@ -236,31 +235,36 @@ func (s *server) flowOf(rows []store.Row, children map[string][]agentRow) []flow
 		}
 		for _, call := range flowCalls(resp) {
 			called[call.ID] = call.Name
-			if call.Spawn {
-				_, prompt := flowInputFromResponse(resp, call.ID)
-				if kids := children[prompt]; len(kids) > 0 {
-					call.AgentSid, call.AgentLabel = kids[0].Sid, kids[0].Label
-					children[prompt] = kids[1:]
-				}
-			}
 			turn.Calls = append(turn.Calls, call)
 		}
 		out = append(out, turn)
 	}
+	linkSubagents(out, children)
 	return out
 }
 
-func flowInputFromResponse(body []byte, id string) (summary, prompt string) {
-	var resp anthropic.Response
-	if json.Unmarshal(body, &resp) != nil {
-		return "", ""
-	}
-	for _, b := range resp.Content {
-		if b.Type == "tool_use" && b.ID == id {
-			return flowInput(b.Input)
+// linkSubagents presents a Task/Agent → child edge only when the correlation is
+// unambiguous. ParentSid proves the child belongs to this session; a duplicate
+// prompt does not prove which identical Task invocation created it.
+func linkSubagents(turns []flowTurn, children map[string][]agentRow) {
+	calls := map[string][]*flowCall{}
+	for i := range turns {
+		for j := range turns[i].Calls {
+			call := &turns[i].Calls[j]
+			if call.Agent && call.prompt != "" {
+				calls[call.prompt] = append(calls[call.prompt], call)
+			}
 		}
 	}
-	return "", ""
+	for prompt, matches := range calls {
+		kids := children[prompt]
+		if len(matches) != 1 || len(kids) != 1 {
+			continue
+		}
+		matches[0].Spawn = true
+		matches[0].AgentSid = kids[0].Sid
+		matches[0].AgentLabel = kids[0].Label
+	}
 }
 
 // latestBody is the newest captured request body in the session — the context as
