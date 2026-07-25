@@ -157,6 +157,7 @@ type traceView struct {
 	CtxBytes      byteSplit `json:"ctxBytes"`
 
 	Rows      []recentRow  `json:"rows"`  // chronological
+	Flow      []flowTurn   `json:"flow"`  // causal request → tool → result chain
 	Cache     []cacheEvent `json:"cache"` // parallel to Rows, one per request
 	Breaks    int          `json:"breaks"`
 	BreakCost float64      `json:"breakCost"`
@@ -211,6 +212,72 @@ type agentRow struct {
 	Tok    tokens  `json:"tok"`
 	Live   bool    `json:"live"`
 	Last   string  `json:"last"`
+}
+
+// flowTurn is the causal version of a request row: what the user asked, which
+// tools the reply invoked, and which results the next request carried back.
+type flowTurn struct {
+	ID       int64        `json:"id"`
+	Time     string       `json:"time"`
+	Ask      string       `json:"ask,omitempty"`
+	Status   int          `json:"status"`
+	Captured bool         `json:"captured"`
+	Calls    []flowCall   `json:"calls"`
+	Results  []flowResult `json:"results"`
+}
+
+type flowCall struct {
+	ID         string `json:"id,omitempty"`
+	Name       string `json:"name"`
+	Summary    string `json:"summary,omitempty"`
+	Spawn      bool   `json:"spawn,omitempty"`
+	AgentSid   string `json:"agentSid,omitempty"`
+	AgentLabel string `json:"agentLabel,omitempty"`
+}
+
+type flowResult struct {
+	ToolUseID string `json:"toolUseId,omitempty"`
+	Name      string `json:"name"`
+	Bytes     int    `json:"bytes"`
+}
+
+func flowInput(raw json.RawMessage) (summary, prompt string) {
+	var in struct {
+		Command     string `json:"command"`
+		Path        string `json:"path"`
+		Query       string `json:"query"`
+		Prompt      string `json:"prompt"`
+		Description string `json:"description"`
+	}
+	if json.Unmarshal(raw, &in) != nil {
+		return "", ""
+	}
+	prompt = strings.TrimSpace(in.Prompt)
+	for _, s := range []string{in.Command, in.Path, in.Query, prompt, in.Description} {
+		if s = strings.Join(strings.Fields(s), " "); s != "" {
+			if len([]rune(s)) > 120 {
+				return string([]rune(s)[:120]) + "…", prompt
+			}
+			return s, prompt
+		}
+	}
+	return "", prompt
+}
+
+func flowCalls(body []byte) []flowCall {
+	var resp anthropic.Response
+	if json.Unmarshal(body, &resp) != nil {
+		return nil
+	}
+	var out []flowCall
+	for _, b := range resp.Content {
+		if b.Type != "tool_use" || b.Name == "" {
+			continue
+		}
+		summary, _ := flowInput(b.Input)
+		out = append(out, flowCall{ID: b.ID, Name: b.Name, Summary: summary, Spawn: b.Name == "Task" || b.Name == "Agent"})
+	}
+	return out
 }
 
 // What kind of work each tool does — and, for exploreTools, whose output lands

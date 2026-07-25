@@ -253,6 +253,34 @@
  * @property {string} last
  */
 
+/** One tool invocation emitted by a reply in the causal session flow.
+ * @typedef {object} flowCall
+ * @property {string} [id]
+ * @property {string} name
+ * @property {string} [summary]
+ * @property {boolean} [spawn]
+ * @property {string} [agentSid]
+ * @property {string} [agentLabel]
+ */
+
+/** One tool result carried back in a request.
+ * @typedef {object} flowResult
+ * @property {string} [toolUseId]
+ * @property {string} name
+ * @property {number} bytes
+ */
+
+/** One causal request → tools → next-request-results turn.
+ * @typedef {object} flowTurn
+ * @property {number} id
+ * @property {string} time
+ * @property {string} [ask]
+ * @property {number} status
+ * @property {boolean} captured
+ * @property {flowCall[]} calls
+ * @property {flowResult[]} results
+ */
+
 /**
  * @typedef {object} traceView
  * @property {string} sid
@@ -274,6 +302,7 @@
  * @property {number} contextWindow
  * @property {byteSplit} ctxBytes
  * @property {reqRow[]} rows
+ * @property {flowTurn[]} flow
  * @property {cacheEvent[]} cache
  * @property {number} breaks
  * @property {number} breakCost
@@ -711,6 +740,7 @@ function renderTrace() {
     '<span style="color:' + (t.live ? MRD : '#6f6f6f') + '">' + (t.live ? 'live' : 'idle ' + esc(t.idle)) + '</span></div>';
 
   h += traceStats(t);
+  h += executionMap(t);
   h += agentsPanel(t);
   h += insightCards(t);
   h += contextChart(t);
@@ -721,6 +751,63 @@ function renderTrace() {
   h += traceList(t);
 
   return h + '</div>';
+}
+
+/* ---------- causal session flow ----------
+   The request table below is the accounting ledger. This panel is the story:
+   the ask that entered each turn, the results it carried in, and every tool or
+   subagent the reply sent out. */
+/** @param {traceView} t @returns {string} */
+function executionMap(t) {
+  var F = t.flow || [], i, j;
+  if (!F.length) return '';
+
+  var h = '<section class="flow"><div class="hdrline"><div class="cap">Session flow ' +
+    '<span class="sub">· user prompt → agent action → tool result</span></div>' +
+    '<div class="note">' + F.length + (F.length === 1 ? ' turn' : ' turns') + ' · captures reveal the full chain</div></div>' +
+    '<div class="flow-legend"><span><i class="flow-dot user"></i>prompt</span><span><i class="flow-dot result"></i>result returned</span>' +
+    '<span><i class="flow-dot call"></i>agent call</span><span><i class="flow-dot spawn"></i>subagent spawned</span></div>' +
+    '<div class="flow-list">';
+
+  for (i = 0; i < F.length; i++) {
+    var turn = F[i], bad = turn.status >= 400;
+    h += '<article class="flow-turn' + (bad ? ' err' : '') + '"><div class="flow-rail"><span></span></div><div class="flow-body">' +
+      '<div class="flow-meta"><span class="m">' + esc(clock(tms(turn.time))) + '</span><span>turn ' + (i + 1) + '</span>' +
+      '<span class="flow-status" style="color:' + (bad ? MER : MRD) + '">' + esc(String(turn.status)) + '</span></div>';
+
+    if (turn.ask) h += '<div class="flow-ask"><span>USER</span><strong>' + esc(turn.ask) + '</strong></div>';
+    if (!turn.captured) {
+      h += '<div class="flow-missing">capture pruned · request facts remain below</div></div></article>';
+      continue;
+    }
+
+    if (turn.results && turn.results.length) {
+      h += '<div class="flow-results">';
+      for (j = 0; j < turn.results.length; j++) {
+        var result = turn.results[j];
+        h += '<div class="flow-result"><span class="flow-arrow">↳</span><span class="flow-kind">RESULT</span>' +
+          '<span class="m">' + esc(result.name) + '</span><span class="flow-detail">' + fK(result.bytes) + ' returned to the agent</span></div>';
+      }
+      h += '</div>';
+    }
+
+    if (turn.calls && turn.calls.length) {
+      h += '<div class="flow-calls">';
+      for (j = 0; j < turn.calls.length; j++) {
+        var call = turn.calls[j], kind = call.spawn ? 'SPAWN' : 'TOOL';
+        h += '<div class="flow-call' + (call.spawn ? ' spawn' : '') + '"><span class="flow-arrow">↳</span>' +
+          '<span class="flow-kind">' + kind + '</span><span class="m flow-name">' + esc(call.name) + '</span>' +
+          (call.summary ? '<span class="flow-detail" title="' + esc(call.summary) + '">' + esc(call.summary) + '</span>' : '') +
+          (call.agentSid ? '<button type="button" class="flow-agent" data-sid="' + esc(call.agentSid) + '">trace subagent · ' + esc(call.agentLabel || call.agentSid) + ' →</button>' : '') +
+          '</div>';
+      }
+      h += '</div>';
+    } else if (!bad) {
+      h += '<div class="flow-reply">agent replied without a tool call</div>';
+    }
+    h += '</div></article>';
+  }
+  return h + '</div></section>';
 }
 
 /** @param {traceView} t @returns {string} */
