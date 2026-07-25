@@ -132,6 +132,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,'Helvetic
    of hand-offs, not a second dense metrics table. The left rail makes the
    chronological parentage legible even when a turn has several tool calls. */
 .flow{margin-top:42px;padding:20px 22px 4px;border:1px solid rgba(90,162,247,0.16);background:linear-gradient(110deg,rgba(90,162,247,0.075),rgba(47,191,135,0.025) 54%,rgba(255,255,255,0.012))}
+.flow.flow-inline{margin:0;padding:15px 18px 2px;border-width:0 0 1px;border-color:rgba(90,162,247,.13);background:rgba(90,162,247,.035)}
+.flow-inline .flow-list{margin-top:13px}.flow-inline .flow-turn{padding-bottom:10px;min-height:0}.flow-inline .flow-rail:before{display:none}
 .flow-legend{display:flex;flex-wrap:wrap;gap:15px;margin-top:13px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9.5px;color:#6f6f6f}
 .flow-legend span{display:flex;align-items:center;gap:5px}
 .flow-dot{width:6px;height:6px;border-radius:50%;display:block}.flow-dot.user{background:#ededed}.flow-dot.result{background:#d9a04e}.flow-dot.call{background:#5aa2f7}.flow-dot.spawn{background:#a78bfa}
