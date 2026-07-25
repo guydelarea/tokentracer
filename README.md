@@ -89,6 +89,10 @@ The dashboard polls every two seconds. It has three screens, and they nest:
 - **Session trace** — click a session and open the on-demand **session graph** for a compact, chronological view of every prompt, tool call, result, and subagent. Click a graph operation to open its **operation flow**: the user prompt, tool calls, returned tool results, and any subagent it spawned; click a spawned subagent to open its own trace. The rest of the trace stays compact until needed. Then inspect where its money went: the context staircase (every request re-ships the whole conversation, and the cumulative-$ line over it is the integral of that climb), what the replies were made of, which requests broke the cache **and why**, what the tools have dumped into the context, and a **cut list** — the schemas it ships on every request and has never once called, priced one at a time.
 - **Inspector** — click a request. Its billing split, its byte composition, system prompt, message history, decoded response, raw body.
 
+Opening a session adds `?session=<id>` to the dashboard URL. That URL can be
+bookmarked or shared, survives a refresh, and participates in browser back and
+forward navigation.
+
 **Do next** is the point of the whole thing. Each card is a fact with a price on it, ranked by what it costs, and each one is computed in Go where a test can hold it to account. On a real Claude Code session: *119 schemas ride on every request and were never invoked* — 53.7k tokens, resent every turn. Your prompt is not what costs you money.
 
 Cache breaks are priced the only honest way: at what the request cost **above what a cache hit would have cost**. An idle gap past the 5-minute TTL re-writes the entire prefix even though not one byte changed — on the session in the screenshot, that alone re-billed $0.92 of a $1.18 bill.

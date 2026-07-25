@@ -387,13 +387,30 @@ var D = {
 /** @type {traceView|null} */
 var T = null;
 
+/* A session is a page, not just an in-memory selection. Keeping its id in the
+   query string makes traces refreshable and shareable without asking the Go
+   server to serve a second copy of the dashboard at every possible path. */
+/** @returns {string|null} */
+function sessionFromURL() {
+  var sid = new URL(window.location.href).searchParams.get('session');
+  return sid || null;
+}
+
+/** @param {string|null} sid @returns {string} */
+function sessionURL(sid) {
+  var url = new URL(window.location.href);
+  if (sid) url.searchParams.set('session', sid);
+  else url.searchParams.delete('session');
+  return url.pathname + url.search + url.hash;
+}
+
 /** The whole of the page's state: which screen, which session, which request.
  * `open` is the inspector's expand/collapse state — one keyed map rather than a
  * flag per thing, because the set of expandable things is data-driven. It is
  * reset whenever a new request is opened. `xrow` is the same idea for the trace
  * list's unfolded rows, keyed by request id so it survives the 2s re-render.
- * @type {{sid: string|null, id: number|null, tab: string, toolsAll: boolean, cutAll: boolean, open: Record<string, boolean|undefined>, rawSide: string, xrow: Record<number, boolean|undefined>}} */
-var S = { sid: null, id: null, tab: 'request', toolsAll: false, cutAll: false, graph: false, open: {}, rawSide: 'request', xrow: {} };
+ * @type {{sid: string|null, id: number|null, tab: string, toolsAll: boolean, cutAll: boolean, graph: boolean, open: Record<string, boolean|undefined>, rawSide: string, xrow: Record<number, boolean|undefined>}} */
+var S = { sid: sessionFromURL(), id: null, tab: 'request', toolsAll: false, cutAll: false, graph: false, open: {}, rawSide: 'request', xrow: {} };
 
 var PV = /** @type {Record<string, number|undefined>} */ ({}), PVT = /** @type {Record<string, number|undefined>} */ ({});
 /** @type {captureView|null} */
@@ -708,7 +725,7 @@ function sessionRowHtml(s) {
     ? '<span class="agn">+' + s.agents + (s.agents === 1 ? ' agent' : ' agents') + '</span>'
     : '';
 
-  return '<div class="sgrid srow" data-sid="' + esc(s.id) + '">' +
+  return '<a class="sgrid srow" data-sid="' + esc(s.id) + '" href="' + esc(sessionURL(s.id)) + '">' +
     '<span class="state"><span class="dot" style="background:' + dotC + ';animation:' + dotA + '"></span>' +
     '<span class="tx" style="color:' + stC + '">' + stTx + '</span></span>' +
     '<span style="display:flex;align-items:center;gap:8px;min-width:0">' +
@@ -720,7 +737,7 @@ function sessionRowHtml(s) {
     '<span class="snum" style="color:#9f9f9f">' + fT(tot) + '</span>' +
     '<span class="snum" style="color:#9f9f9f">' + unused + '</span>' +
     '<span class="snum" style="color:#9f9f9f">' + s.req + (s.err > 0 ? '<span style="color:' + MER + '"> · ' + s.err + '</span>' : '') + '</span>' +
-    '<span class="snum" style="color:#6f6f6f">' + esc(s.idle) + '</span></div>';
+    '<span class="snum" style="color:#6f6f6f">' + esc(s.idle) + '</span></a>';
 }
 
 /* ---------- the session trace ----------
@@ -830,7 +847,7 @@ function operationFlow(t, id) {
       h += '<div class="flow-call' + (call.spawn ? ' spawn' : '') + '"><span class="flow-arrow">↳</span>' +
         '<span class="flow-kind">' + kind + '</span><span class="m flow-name">' + esc(call.name) + '</span>' +
         (call.summary ? '<span class="flow-detail" title="' + esc(call.summary) + '">' + esc(call.summary) + '</span>' : '') +
-        (call.agentSid ? '<button type="button" class="flow-agent" data-sid="' + esc(call.agentSid) + '">trace subagent · ' + esc(call.agentLabel || call.agentSid) + ' →</button>' : '') +
+        (call.agentSid ? '<a class="flow-agent" data-sid="' + esc(call.agentSid) + '" href="' + esc(sessionURL(call.agentSid)) + '">trace subagent · ' + esc(call.agentLabel || call.agentSid) + ' →</a>' : '') +
         '</div>';
     }
     h += '</div>';
@@ -894,14 +911,14 @@ function agentsPanel(t) {
     var tk = a.tok || { in: 0, read: 0, write: 0, out: 0 };
     var tot = (tk.in || 0) + (tk.read || 0) + (tk.write || 0) + (tk.out || 0);
     var cost = a.priced ? fUsd(a.cost) : '<span class="badge unp">unpriced</span>';
-    h += '<div class="agrow" data-sid="' + esc(a.sid) + '">' +
+    h += '<a class="agrow" data-sid="' + esc(a.sid) + '" href="' + esc(sessionURL(a.sid)) + '">' +
       '<span class="state"><span class="dot" style="background:' + (a.live ? MRD : '#4f4f4f') +
       ';animation:' + (a.live ? 'ttPulse 2.6s ease-in-out infinite' : 'none') + '"></span></span>' +
       '<span class="slabel" style="font-size:12.5px;color:#c9c9c9" title="' + esc(a.label) + '">' + esc(a.label) + '</span>' +
       '<span class="m ell" style="font-size:10.5px;color:#7a7a7a">' + esc(shortModel(a.model)) + '</span>' +
       '<span class="snum" style="color:#9f9f9f">' + a.req + (a.err > 0 ? '<span style="color:' + MER + '"> · ' + a.err + '</span>' : '') + '</span>' +
       '<span class="snum" style="color:#9f9f9f">' + fT(tot) + '</span>' +
-      '<span class="snum" style="color:#ececec">' + cost + '</span></div>';
+      '<span class="snum" style="color:#ececec">' + cost + '</span></a>';
   }
   return h + '</div>';
 }
@@ -1894,17 +1911,23 @@ function wire() {
   // sessions → trace
   els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-sid]'));
   for (i = 0; i < els.length; i++) els[i].onclick = (function (sid) {
-    return function () { hideTip(); openTrace(sid); };
+    /** @param {MouseEvent} e */
+    return function (e) {
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      hideTip();
+      navigateSession(sid, false);
+    };
   })(/** @type {string} */ (els[i].getAttribute('data-sid')));
 
   // the waste tile → the cut list of the session shipping the most of it
   var wo = document.querySelector('#wasteopen');
   if (wo) /** @type {HTMLElement} */ (wo).onclick = function () {
-    if (D.overview.worstSid) openTrace(D.overview.worstSid);
+    if (D.overview.worstSid) navigateSession(D.overview.worstSid, false);
   };
 
   var back = document.querySelector('#back');
-  if (back) /** @type {HTMLElement} */ (back).onclick = function () { S.sid = null; T = null; render(); };
+  if (back) /** @type {HTMLElement} */ (back).onclick = function () { navigateSession(null, false); };
 
   var ca = document.querySelector('#cutall');
   if (ca) /** @type {HTMLElement} */ (ca).onclick = function () { S.cutAll = !S.cutAll; render(); };
@@ -2042,10 +2065,12 @@ function poll() {
 function pollTrace(sid, flow, forceRender) {
   var target = '/api/trace?sid=' + encodeURIComponent(sid) + (flow ? '&flow=1' : '');
   fetch(target).then(function (r) {
-    return r.ok ? r.json() : null;
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error('trace request failed: ' + r.status);
+    return r.json();
   }).then(/** @param {traceView|null} j */ function (j) {
     if (S.sid !== sid) return; // they navigated away while it was in flight
-    if (!j) { S.sid = null; T = null; render(); return; }
+    if (!j) { navigateSession(null, true); return; }
     // A lightweight poll must not discard flow that an explicit, on-demand
     // request just loaded for the graph or an expanded operation.
     if (!flow && T && T.flow) j.flow = T.flow;
@@ -2065,11 +2090,24 @@ function traceDetailOpen() {
   return false;
 }
 
-/** @param {string} sid */
-function openTrace(sid) {
+/** Change the visible screen without writing browser history. */
+/** @param {string|null} sid */
+function showSession(sid) {
+  if (S.id !== null) closeInsp();
   S.sid = sid; T = null; S.toolsAll = false; S.cutAll = false; S.graph = false; S.xrow = {};
   render();      // the shell, with its loading note
-  pollTrace(sid, false);
+  if (sid) pollTrace(sid, false);
+}
+
+/** @param {string|null} sid @param {boolean} replace */
+function navigateSession(sid, replace) {
+  var target = sessionURL(sid);
+  var current = window.location.pathname + window.location.search + window.location.hash;
+  if (target !== current) {
+    if (replace) window.history.replaceState(null, '', target);
+    else window.history.pushState(null, '', target);
+  }
+  showSession(sid);
 }
 
 /* ---------- retention ----------
@@ -2090,7 +2128,10 @@ $('#scrim').onclick = closeInsp;
 window.addEventListener('keydown', function (e) {
   if (e.key !== 'Escape') return;
   if (S.id !== null) closeInsp();
-  else if (S.sid) { S.sid = null; T = null; render(); }
+  else if (S.sid) navigateSession(null, false);
+});
+window.addEventListener('popstate', function () {
+  showSession(sessionFromURL());
 });
 render();
 poll();
