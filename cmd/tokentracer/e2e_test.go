@@ -267,6 +267,74 @@ func TestEndToEnd(t *testing.T) {
 	}
 }
 
+func TestEndToEndOpenAIResponses(t *testing.T) {
+	sse := []byte("event: response.completed\n" +
+		`data: {"type":"response.completed","response":{"id":"resp_e2e","object":"response","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Running it"}]},{"type":"function_call","call_id":"call_1","name":"exec_command","arguments":"{\"cmd\":\"go test ./...\"}"}],"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":60,"cache_write_tokens":20},"output_tokens":30,"output_tokens_details":{"reasoning_tokens":10}}}}` +
+		"\n\n")
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Errorf("upstream path = %q, want /v1/responses", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write(sse)
+	}))
+	t.Cleanup(up.Close)
+
+	a, front := newTestApp(t, up.URL+"/v1")
+	request := []byte(`{
+	  "model":"gpt-5.6-sol","stream":true,"prompt_cache_key":"codex-e2e",
+	  "tools":[{"type":"function","name":"exec_command","description":"run a command"}],
+	  "input":[{"role":"user","content":[{"type":"input_text","text":"Run all tests"}]}]
+	}`)
+	resp, err := http.Post(front.URL+"/responses", "application/json", bytes.NewReader(request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, sse) {
+		t.Fatalf("client stream changed: got %d bytes, want %d", len(got), len(sse))
+	}
+
+	a.recorder.Close()
+	rows, err := a.store.Recent(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.SessionID != "codex-e2e" || row.ModelReq != "gpt-5.6-sol" || row.ModelServed != "gpt-5.6-sol" {
+		t.Errorf("request identity = %+v", row)
+	}
+	if row.InputTokens == nil || *row.InputTokens != 20 ||
+		row.CacheReadTokens == nil || *row.CacheReadTokens != 60 ||
+		row.CacheW5mTokens == nil || *row.CacheW5mTokens != 20 ||
+		row.OutputTokens == nil || *row.OutputTokens != 30 {
+		t.Errorf("normalized usage = in:%v read:%v write:%v out:%v",
+			row.InputTokens, row.CacheReadTokens, row.CacheW5mTokens, row.OutputTokens)
+	}
+	if row.ThinkTokens != 10 || row.Op != "tool_use · exec_command — go test ./..." {
+		t.Errorf("response shape = think:%d op:%q", row.ThinkTokens, row.Op)
+	}
+
+	stats := getStats(t, front)
+	if stats.Traced != 1 || stats.UnpricedReqs != 0 || stats.Cost <= 0 {
+		t.Errorf("stats = traced:%d unpriced:%d cost:%f", stats.Traced, stats.UnpricedReqs, stats.Cost)
+	}
+	if len(stats.Sessions) != 1 || stats.Sessions[0].ID != "codex-e2e" {
+		t.Errorf("sessions = %+v", stats.Sessions)
+	}
+	capture := getCapture(t, front, row.ID)
+	if len(capture.Breakdown.Tools) != 1 || capture.Breakdown.Tools[0].Name != "exec_command" {
+		t.Errorf("breakdown tools = %+v", capture.Breakdown.Tools)
+	}
+}
+
 // Claude Code fires parallel requests as a matter of course. Both must land.
 func TestConcurrentStreamsBothLand(t *testing.T) {
 	up := fakeUpstream(t, replaySSE(t))

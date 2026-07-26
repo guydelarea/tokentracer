@@ -1,16 +1,18 @@
-// Seeded from LiteLLM's community price registry, then kept current by hand.
+// Seeded from LiteLLM's community price registry, then kept current by hand
+// from Anthropic and OpenAI's published model pages.
 //
 // Source: https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
-// Generated: 2026-07-13, hand-updated 2026-07-25 (opus-5, mythos-5, sonnet-5 intro window)
+// OpenAI source: https://developers.openai.com/api/docs/pricing#text-tokens
+// Generated: 2026-07-13, hand-updated 2026-07-26 (GPT-5.6 family and current Claude rows)
 //
-// Hand-added rows come from Anthropic's published list prices, not the registry,
+// Hand-added rows come from the vendors' published list prices, not the registry,
 // which lags a model launch by weeks. A model that ships between regenerations is
 // the whole source of UNPRICED requests, so adding the row by hand is the fix —
 // but only ever with a price we can point at. A guess here is worse than a hole.
 //
 // Prices are USD per 1M tokens (the registry quotes per-token; these are x1e6).
-// Only litellm_provider == "anthropic" claude-* models are included; Bedrock and
-// Vertex spellings of the same models are handled by normalize(), not by extra rows.
+// Bedrock and Vertex spellings of Claude models are handled by normalize(), not
+// by extra rows. OpenAI Responses model IDs match their published names directly.
 //
 // Ordering is load-bearing. Compute takes the FIRST rate whose key is a substring
 // of the model name, so rows are sorted longest-key-first: "claude-opus-4-5" must
@@ -42,6 +44,10 @@ import "time"
 var sonnet5StandardFrom = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 
 var Rates = []Rate{
+	{Key: "gpt-5.6-terra", InPerM: 2.5, OutPerM: 15, LongCtxThreshold: 272_000, LongCtxInPerM: 5, LongCtxOutPerM: 22.5},
+	{Key: "gpt-5.6-luna", InPerM: 1, OutPerM: 6, LongCtxThreshold: 272_000, LongCtxInPerM: 2, LongCtxOutPerM: 9},
+	{Key: "gpt-5.6-sol", InPerM: 5, OutPerM: 30, LongCtxThreshold: 272_000, LongCtxInPerM: 10, LongCtxOutPerM: 45},
+	{Key: "gpt-5.6", InPerM: 5, OutPerM: 30, LongCtxThreshold: 272_000, LongCtxInPerM: 10, LongCtxOutPerM: 45},
 	{Key: "claude-3-7-sonnet-20250219", InPerM: 3, OutPerM: 15},
 	{Key: "claude-sonnet-4-5-20250929", InPerM: 3, OutPerM: 15, LongCtxThreshold: 200_000, LongCtxInPerM: 6, LongCtxOutPerM: 22.5},
 	{Key: "claude-haiku-4-5-20251001", InPerM: 1, OutPerM: 5},

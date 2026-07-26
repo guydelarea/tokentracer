@@ -12,6 +12,7 @@ import (
 
 	"github.com/guydelarea/tokentracer/internal/anthropic"
 	"github.com/guydelarea/tokentracer/internal/store"
+	"github.com/guydelarea/tokentracer/internal/wire"
 )
 
 // Every test drives the Recorder through its real interface — Record(Exchange)
@@ -270,6 +271,49 @@ func TestRecordVertexExchange(t *testing.T) {
 	}
 }
 
+func TestRecordOpenAIResponsesExchange(t *testing.T) {
+	r, st := newRecorder(t)
+	req := []byte(`{
+	  "model":"gpt-5.6-sol","stream":true,"prompt_cache_key":"codex-thread",
+	  "tools":[{"type":"function","name":"exec_command","description":"run a command"}],
+	  "input":[{"role":"user","content":[{"type":"input_text","text":"Run the tests"}]}]
+	}`)
+	resp := []byte("event: response.completed\n" +
+		`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","call_id":"call_1","name":"exec_command","arguments":"{\"cmd\":\"go test ./...\"}"}],"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":60,"cache_write_tokens":20},"output_tokens":30,"output_tokens_details":{"reasoning_tokens":10}}}}` +
+		"\n\n")
+	r.Record(Exchange{
+		Start: time.Now(), Method: "POST", Path: "/responses", Status: 200, Streamed: true,
+		ReqBody: req, RespBody: resp,
+	})
+	rows := rowsOf(t, r, st)
+
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.ModelReq != "gpt-5.6-sol" || row.ModelServed != "gpt-5.6-sol" || row.SessionID != "codex-thread" {
+		t.Errorf("model/session facts = %+v", row)
+	}
+	if deref(row.InputTokens) != 20 || deref(row.CacheReadTokens) != 60 ||
+		deref(row.CacheW5mTokens) != 20 || deref(row.OutputTokens) != 30 {
+		t.Errorf("usage = in:%d read:%d write:%d out:%d",
+			deref(row.InputTokens), deref(row.CacheReadTokens), deref(row.CacheW5mTokens), deref(row.OutputTokens))
+	}
+	if row.ThinkTokens != 10 || row.Op != "tool_use · exec_command — go test ./..." {
+		t.Errorf("response shape = think:%d op:%q", row.ThinkTokens, row.Op)
+	}
+	if row.ToolCount != 1 || row.Label != "Run the tests" {
+		t.Errorf("request shape = tools:%d label:%q", row.ToolCount, row.Label)
+	}
+	_, capture, err := st.Capture(row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(capture, []byte(`"id":"resp_1"`)) || bytes.Contains(capture, []byte("event: response.completed")) {
+		t.Errorf("response capture was not assembled: %s", capture)
+	}
+}
+
 // Degradation is per side. A request body we cannot read must not cost us the
 // usage facts from a response we could.
 func TestRecordBadRequestGoodResponse(t *testing.T) {
@@ -354,15 +398,15 @@ func TestRecordGoodRequestBrokenResponse(t *testing.T) {
 // A panic in the parser is a bug in us. It must produce a row, keep the blob
 // that reproduces it, and leave the worker alive.
 func TestRecordParsePanicKeepsWorkerAlive(t *testing.T) {
-	orig := parseRequest
-	t.Cleanup(func() { parseRequest = orig })
+	orig := observeRequest
+	t.Cleanup(func() { observeRequest = orig })
 
 	// Keyed on the body, not on a flag the worker races us to read.
-	parseRequest = func(body []byte) (anthropic.RequestFacts, error) {
+	observeRequest = func(path string, body []byte) wire.Observation {
 		if bytes.Contains(body, []byte("BOOM")) {
 			panic("synthetic parser explosion")
 		}
-		return orig(body)
+		return orig(path, body)
 	}
 
 	r, st := newRecorder(t)

@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/guydelarea/tokentracer/internal/anthropic"
 	"github.com/guydelarea/tokentracer/internal/billing"
 	"github.com/guydelarea/tokentracer/internal/store"
+	"github.com/guydelarea/tokentracer/internal/wire"
 )
 
 // The sessions table: the dashboard's front page, and the unit of work a person
@@ -91,7 +91,7 @@ type sessionRow struct {
 // any. Resolved by the server from a capture (see toolsFor) and passed into the
 // fold, which stays pure.
 type toolset struct {
-	Items []anthropic.ToolItem
+	Items []wire.ToolItem
 }
 
 // sessionAgg accumulates one session across the lifetime scan.

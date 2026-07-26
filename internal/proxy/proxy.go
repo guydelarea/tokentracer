@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/guydelarea/tokentracer/internal/anthropic"
 	"github.com/guydelarea/tokentracer/internal/record"
+	"github.com/guydelarea/tokentracer/internal/wire"
 )
 
 const (
@@ -65,9 +65,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The upstream call must outlive the client. When a user hits esc, Anthropic
-	// still bills what it generated, and the final message_delta usage arrives
-	// after the client is gone — so we detach from the client's cancellation.
+	// The upstream call must outlive the client. When a user hits esc, generated
+	// tokens may still be billed, and final usage arrives after the client is
+	// gone — so we detach from the client's cancellation.
 	ctx := context.WithoutCancel(r.Context())
 	out, err := http.NewRequestWithContext(ctx, r.Method, p.target(r), bytes.NewReader(reqBody))
 	if err != nil {
@@ -155,14 +155,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // proxied and forgotten — on Vertex, count_tokens hides behind the
 // "count-tokens" pseudo-model.
 func recordable(r *http.Request) bool {
-	if r.Method != http.MethodPost {
-		return false
-	}
-	if r.URL.Path == "/v1/messages" {
-		return true
-	}
-	m := anthropic.VertexModel(r.URL.Path)
-	return m != "" && m != "count-tokens"
+	return wire.Recordable(r.Method, r.URL.Path)
 }
 
 // target is the upstream URL for a client request: the upstream base with the

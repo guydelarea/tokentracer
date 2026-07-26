@@ -257,6 +257,66 @@ func TestComputeZeroUsageIsPricedZero(t *testing.T) {
 	closeTo(t, b.Total, 0, "Total")
 }
 
+func TestContextWindow(t *testing.T) {
+	tests := []struct {
+		model string
+		want  int64
+	}{
+		{"gpt-5.6-sol", 1_050_000},
+		{"gpt-5.6-terra", 1_050_000},
+		{"claude-opus-5[1m]", 1_000_000},
+		{"claude-sonnet-5", 200_000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			if got := ContextWindow(tt.model); got != tt.want {
+				t.Errorf("ContextWindow(%q) = %d, want %d", tt.model, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCacheTTLFor(t *testing.T) {
+	if got := CacheTTLFor("gpt-5.6-sol"); got != 30*time.Minute {
+		t.Errorf("GPT-5.6 cache TTL = %s, want 30m", got)
+	}
+	if got := CacheTTLFor("claude-sonnet-5"); got != 5*time.Minute {
+		t.Errorf("Claude cache TTL = %s, want 5m", got)
+	}
+}
+
+func TestSeedTablePricesGPT56Usage(t *testing.T) {
+	at := time.Now()
+	tests := []struct {
+		model      string
+		wantIn     float64
+		wantCached float64
+		wantWrite  float64
+		wantOutput float64
+	}{
+		{"gpt-5.6-sol", 5, 0.5, 6.25, 30},
+		{"gpt-5.6", 5, 0.5, 6.25, 30},
+		{"gpt-5.6-terra", 2.5, 0.25, 3.125, 15},
+		{"gpt-5.6-luna", 1, 0.1, 1.25, 6},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			closeTo(t, Compute(Rates, tt.model, Usage{In: 1_000_000}, at).In, tt.wantIn*2, "long-context In")
+			closeTo(t, Compute(Rates, tt.model, Usage{Read: 1_000_000}, at).Read, tt.wantCached*2, "long-context Read")
+			closeTo(t, Compute(Rates, tt.model, Usage{Write5m: 1_000_000}, at).Write, tt.wantWrite*2, "long-context Write")
+			closeTo(t, Compute(Rates, tt.model, Usage{Out: 1_000_000}, at).Out, tt.wantOutput, "standard Output")
+
+			boundary := Compute(Rates, tt.model, Usage{In: 272_000, Out: 1_000_000}, at)
+			closeTo(t, boundary.In, 0.272*tt.wantIn, "boundary In")
+			closeTo(t, boundary.Out, tt.wantOutput, "boundary Output")
+
+			premium := Compute(Rates, tt.model, Usage{In: 272_001, Out: 1_000_000}, at)
+			closeTo(t, premium.In, 0.272001*tt.wantIn*2, "premium In")
+			closeTo(t, premium.Out, tt.wantOutput*1.5, "premium Output")
+		})
+	}
+}
+
 // The fixture in testdata/ is a claude-sonnet-5 request. If the seed table ever
 // stops matching it, every cost in the dashboard silently goes unpriced — this
 // test is the tripwire.
@@ -285,6 +345,10 @@ func TestSeedTablePricesRealModelNames(t *testing.T) {
 		"claude-opus-5[1m]",      // Claude Code's 1M-window spelling
 		"claude-opus-5@20260601", // Vertex's spelling
 		"claude-mythos-5",
+		"gpt-5.6",
+		"gpt-5.6-sol",
+		"gpt-5.6-terra",
+		"gpt-5.6-luna",
 	}
 	for _, m := range models {
 		t.Run(m, func(t *testing.T) {
