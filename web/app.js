@@ -1899,9 +1899,24 @@ function redrawInsp() {
   wireInsp();
 }
 
-/* ---------- shell ---------- */
-function render() {
-  $('#app').innerHTML = S.sid ? renderTrace() : renderHome();
+/* ---------- shell ----------
+   A poll draws the same frame a click does, so a session's numbers keep moving
+   while it is being read. What a poll must not do is announce itself: `quiet`
+   suppresses the entry animation of anything already on screen, and the graph
+   keeps the horizontal scroll the person put it at. */
+/** @param {boolean} [quiet] this frame came from the 2s poll, not from a click */
+function render(quiet) {
+  var app = $('#app');
+  var graph = document.querySelector('.flow-graph');
+  var scrolled = graph ? graph.scrollLeft : 0;
+
+  app.className = quiet ? 'quiet' : '';
+  app.innerHTML = S.sid ? renderTrace() : renderHome();
+
+  if (quiet && scrolled) {
+    graph = document.querySelector('.flow-graph');
+    if (graph) graph.scrollLeft = scrolled;
+  }
   wire();
 }
 
@@ -1937,7 +1952,7 @@ function wire() {
   if (fg) /** @type {HTMLElement} */ (fg).onclick = function () {
     S.graph = !S.graph;
     render();
-    if (S.graph && S.sid) pollTrace(S.sid, true, true);
+    if (S.graph && S.sid) pollTrace(S.sid, true);
   };
 
   // trace rows unfold in place; the bodies live one click further, in the inspector
@@ -1947,14 +1962,14 @@ function wire() {
       hideTip();
       S.xrow[id] = !S.xrow[id];
       render();
-      if (S.xrow[id] && S.sid) pollTrace(S.sid, true, true);
+      if (S.xrow[id] && S.sid) pollTrace(S.sid, true);
     };
   })(Number(els[i].getAttribute('data-id')));
   els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-graph-id]'));
   for (i = 0; i < els.length; i++) els[i].onclick = (function (id) {
     return function () {
       S.graph = false; S.xrow[id] = true; render();
-      if (S.sid) pollTrace(S.sid, true, true);
+      if (S.sid) pollTrace(S.sid, true);
       var row = document.querySelector('[data-id="' + id + '"]');
       if (row) row.scrollIntoView({ block: 'center', behavior: 'smooth' });
     };
@@ -2057,12 +2072,12 @@ function poll() {
     // snaps it back under the cursor.
     var ret = /** @type {HTMLSelectElement} */ ($('#ret'));
     if (document.activeElement !== ret) ret.value = store.retention || 'off';
-    if (S.sid) pollTrace(S.sid, false); else render();
+    if (S.sid) pollTrace(S.sid, false, true); else render(true);
   }).catch(function () { /* the server is restarting; the next poll picks it up */ });
 }
 
-/** @param {string} sid @param {boolean} flow @param {boolean} [forceRender] */
-function pollTrace(sid, flow, forceRender) {
+/** @param {string} sid @param {boolean} flow @param {boolean} [quiet] the 2s poll, not a click */
+function pollTrace(sid, flow, quiet) {
   var target = '/api/trace?sid=' + encodeURIComponent(sid) + (flow ? '&flow=1' : '');
   fetch(target).then(function (r) {
     if (r.status === 404) return null;
@@ -2075,13 +2090,20 @@ function pollTrace(sid, flow, forceRender) {
     // request just loaded for the graph or an expanded operation.
     if (!flow && T && T.flow) j.flow = T.flow;
     T = j;
-    // An expanded operation is a reading state. Replacing #app every two
-    // seconds restarts its animation and jumps the person out of the detail
-    // they clicked. Keep collecting fresh trace data, then render it once they
-    // close the detail (or take another action that renders the page).
-    if (forceRender || (!traceDetailOpen() && !S.graph)) render();
+    render(quiet);
+    // The graph and an unfolded operation are drawn from the capture-backed
+    // flow, which the cheap poll does not carry: without this they would sit at
+    // the operations the session had when they were opened. Re-read it only
+    // when the session has actually grown — never twice a second for a
+    // conversation that has not moved.
+    if (!flow && staleFlow(j) && (S.graph || traceDetailOpen())) pollTrace(sid, true, quiet);
   }).catch(function () { /* next poll */ });
 }
+
+/** The flow is one turn per request, so a shorter one is a flow that predates
+ * requests the session has since made.
+ * @param {traceView} t @returns {boolean} */
+function staleFlow(t) { return (t.flow || []).length < (t.rows || []).length; }
 
 /** @returns {boolean} */
 function traceDetailOpen() {
