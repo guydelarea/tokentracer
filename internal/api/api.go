@@ -58,6 +58,7 @@ func Handler(st *store.Store, cfg Config) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /dashboard", s.dashboard)
 	mux.HandleFunc("GET /api/stats", s.stats)
+	mux.HandleFunc("GET /api/history", s.history)
 	mux.HandleFunc("GET /api/trace", s.trace)
 	mux.HandleFunc("GET /api/capture", s.capture)
 	mux.HandleFunc("POST /api/settings", s.settings)
@@ -114,6 +115,22 @@ func (s *server) stats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(view); err != nil {
 		log.Printf("tokentracer: encoding stats: %v", err)
+	}
+}
+
+// history is the same three steps as stats — query → fold → encode — over the
+// same lifetime scan. Its own endpoint rather than a field on /api/stats because
+// the overview never draws it, and the screen that does is not usually open.
+func (s *server) history(w http.ResponseWriter, r *http.Request) {
+	lifetime, err := s.st.Lifetime()
+	if err != nil {
+		serverError(w, "lifetime", err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(foldHistory(lifetime, s.rates, s.now())); err != nil {
+		log.Printf("tokentracer: encoding history: %v", err)
 	}
 }
 

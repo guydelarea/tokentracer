@@ -183,6 +183,24 @@
  * @property {string} retention    off | 24h | 7d | 30d
  */
 
+/**
+ * One local day of spend, priced one request at a time in Go and only then
+ * added up. Months are summed from these on this side — see byMonth.
+ * @typedef {object} dayBucket
+ * @property {number} t         unix ms at local midnight
+ * @property {costs} cost
+ * @property {tokens} tok
+ * @property {number} n
+ * @property {number} err
+ * @property {number} sessions  distinct session ids that day
+ * @property {number} unpriced  rows with no rate for their model — never a silent $0
+ * @property {Record<string, number>} models  billed model → its spend that day
+ */
+
+/** @typedef {object} historyView
+ * @property {dayBucket[]} days  oldest first; a day with no traffic has no bucket, except today
+ */
+
 /** What one request's cache did, and what it cost.
  * @typedef {object} cacheEvent
  * @property {number} id
@@ -386,6 +404,9 @@ var D = {
 };
 /** @type {traceView|null} */
 var T = null;
+/** The day buckets, oldest first. Empty until /api/history first lands.
+ * @type {dayBucket[]} */
+var H = [];
 
 /* A session is a page, not just an in-memory selection. Keeping its id in the
    query string makes traces refreshable and shareable without asking the Go
@@ -394,6 +415,24 @@ var T = null;
 function sessionFromURL() {
   var sid = new URL(window.location.href).searchParams.get('session');
   return sid || null;
+}
+
+/* And a view is a page for the same reason. The URL is the state here rather
+   than a field on S: nothing has to keep the two in sync, so a back button, a
+   bookmark and a click cannot disagree about which screen you are on.
+   ?session= wins over both — it names one thing to look at. */
+/** @returns {string} overview | history */
+function viewFromURL() {
+  return new URL(window.location.href).searchParams.get('view') === 'history' ? 'history' : 'overview';
+}
+
+/** @param {string} view @returns {string} */
+function viewURL(view) {
+  var url = new URL(window.location.href);
+  url.searchParams.delete('session'); // switching screens leaves the trace behind
+  if (view === 'history') url.searchParams.set('view', 'history');
+  else url.searchParams.delete('view');
+  return url.pathname + url.search + url.hash;
 }
 
 /** @param {string|null} sid @returns {string} */
@@ -409,8 +448,9 @@ function sessionURL(sid) {
  * flag per thing, because the set of expandable things is data-driven. It is
  * reset whenever a new request is opened. `xrow` is the same idea for the trace
  * list's unfolded rows, keyed by request id so it survives the 2s re-render.
- * @type {{sid: string|null, id: number|null, tab: string, toolsAll: boolean, cutAll: boolean, graph: boolean, open: Record<string, boolean|undefined>, rawSide: string, xrow: Record<number, boolean|undefined>}} */
-var S = { sid: sessionFromURL(), id: null, tab: 'request', toolsAll: false, cutAll: false, graph: false, open: {}, rawSide: 'request', xrow: {} };
+ * `range` is the history screen's span in days; 365 is the one that means months.
+ * @type {{sid: string|null, id: number|null, tab: string, toolsAll: boolean, cutAll: boolean, graph: boolean, open: Record<string, boolean|undefined>, rawSide: string, xrow: Record<number, boolean|undefined>, range: number}} */
+var S = { sid: sessionFromURL(), id: null, tab: 'request', toolsAll: false, cutAll: false, graph: false, open: {}, rawSide: 'request', xrow: {}, range: 7 };
 
 var PV = /** @type {Record<string, number|undefined>} */ ({}), PVT = /** @type {Record<string, number|undefined>} */ ({});
 /** @type {captureView|null} */
@@ -523,8 +563,8 @@ var COMP_LEGEND = [[CTOOL, 'tool schemas'], [CSYS, 'system'], [CHIST, 'history']
 /* ---------- tooltip ---------- */
 var TIP = /** @type {HTMLElement} */ (/** @type {any} */ (null));
 /** Everything a hover handler needs, indexed the way the DOM data- attributes index it.
- * @type {{buckets: bucket[], rows: reqRow[], cache: cacheEvent[], buck: traceBucket[]}} */
-var TIPDATA = { buckets: [], rows: [], cache: [], buck: [] };
+ * @type {{buckets: bucket[], rows: reqRow[], cache: cacheEvent[], buck: traceBucket[], days: dayBucket[]}} */
+var TIPDATA = { buckets: [], rows: [], cache: [], buck: [], days: [] };
 
 /** @param {string} title @param {string[][]} rows colour, name, value @param {string} foot @returns {string} */
 function tipHtml(title, rows, foot) {
@@ -738,6 +778,331 @@ function sessionRowHtml(s) {
     '<span class="snum" style="color:#9f9f9f">' + unused + '</span>' +
     '<span class="snum" style="color:#9f9f9f">' + s.req + (s.err > 0 ? '<span style="color:' + MER + '"> · ' + s.err + '</span>' : '') + '</span>' +
     '<span class="snum" style="color:#6f6f6f">' + esc(s.idle) + '</span></a>';
+}
+
+/* ---------- history ----------
+   What this has cost over time. The overview answers "what is running right
+   now"; this answers "what did last week cost", which is the question a bill
+   asks.
+
+   Every figure here is a sum of days the server already priced one request at a
+   time (internal/api/history.go). Summing priced days is additive; pricing a
+   summed day is not — so the rollup only ever happens in that order, and nothing
+   on this screen re-derives a price. */
+
+/* Model colours, cycled in rank order. Unlike the token-class palette these
+   carry no fixed meaning: every row is named right next to its swatch. */
+var MODELC = [MIN, MRD, MWR, MTH, MOU, '#8f8f8f'];
+
+/** @param {dayBucket} b @returns {number} */
+function dayCost(b) { var c = b.cost; return (c.in || 0) + (c.read || 0) + (c.write || 0) + (c.out || 0); }
+/** Cache reads over everything that could have been a read — the ratio Go folds
+ * per session, over a whole range of days. @param {tokens} t @returns {number} */
+function hitOf(t) { var all = (t.in || 0) + (t.read || 0) + (t.write || 0); return all > 0 ? (t.read || 0) / all : 0; }
+/** @param {number} usd @param {number} n @returns {number} */
+function perDay(usd, n) { return n > 0 ? usd / n : 0; }
+/** @param {number} t @returns {dayBucket} */
+function zeroDay(t) {
+  return {
+    t: t, cost: { in: 0, read: 0, write: 0, out: 0 }, tok: { in: 0, read: 0, write: 0, out: 0 },
+    n: 0, err: 0, sessions: 0, unpriced: 0, models: {}
+  };
+}
+/** @param {number} t @param {Intl.DateTimeFormatOptions} opts @returns {string} */
+function dstr(t, opts) { return new Date(t).toLocaleDateString(undefined, opts); }
+/** One comparison window, worded. @returns {string} */
+function histPeriod() { return S.range === 365 ? '12 months' : S.range + ' days'; }
+/** How a bucket names itself, in the grain the switcher is on. @param {number} t @returns {string} */
+function histLabel(t) {
+  return S.range === 365
+    ? dstr(t, { month: 'short', year: 'numeric' })
+    : dstr(t, { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+/* Adding buckets up is the one aggregation this file is allowed to do, and it is
+   safe for exactly one reason: the non-additive part — a rate that depends on a
+   request's own size and its own timestamp — already happened, per request, in Go. */
+/** @param {dayBucket[]} list @param {number} t @returns {dayBucket} */
+function sumDays(list, t) {
+  var b = zeroDay(t), i, m, d;
+  for (i = 0; i < list.length; i++) {
+    d = list[i];
+    b.cost.in += d.cost.in; b.cost.read += d.cost.read; b.cost.write += d.cost.write; b.cost.out += d.cost.out;
+    b.tok.in += d.tok.in; b.tok.read += d.tok.read; b.tok.write += d.tok.write; b.tok.out += d.tok.out;
+    b.n += d.n; b.err += d.err; b.unpriced += d.unpriced;
+    // Distinct sessions can only be added up: a session that ran past midnight
+    // counts on each day it worked, which is all a day bucket knows about it.
+    b.sessions += d.sessions;
+    for (m in d.models) b.models[m] = (b.models[m] || 0) + d.models[m];
+  }
+  return b;
+}
+
+/** @param {dayBucket[]} days oldest first @returns {dayBucket[]} */
+function byMonth(days) {
+  var out = [], group = [], key = '', i, d, k;
+  for (i = 0; i < days.length; i++) {
+    d = new Date(days[i].t);
+    k = d.getFullYear() + '-' + d.getMonth();
+    if (k !== key && group.length) { out.push(sumDays(group, monthStart(group[0].t))); group = []; }
+    key = k;
+    group.push(days[i]);
+  }
+  if (group.length) out.push(sumDays(group, monthStart(group[0].t)));
+  return out;
+}
+/** @param {number} t @returns {number} */
+function monthStart(t) { var d = new Date(t); return new Date(d.getFullYear(), d.getMonth(), 1).getTime(); }
+
+/* The buckets one switcher position shows. skip 0 is the visible period and 1
+   the one before it — the same slicing both times, so a comparison can never be
+   against a differently-shaped window.
+
+   A day the server has no bucket for is a day nobody worked, and it gets a zero
+   here so a day off draws as the $0 it was instead of vanishing. The walk steps
+   by calendar day rather than by 86.4M ms: a DST change makes a day 23 or 25
+   hours long, and a fixed step would drift off midnight within a season. */
+/** @param {number} skip @returns {dayBucket[]} */
+function histRange(skip) {
+  var out = [], i;
+  if (S.range === 365) {
+    // The newest twelve months — which drops the partial month recording began
+    // in as soon as there is a thirteenth. Half a month drawn beside twelve
+    // whole ones reads as a collapse in spend that never happened.
+    var M = byMonth(H), end = M.length - skip * 12;
+    return M.slice(Math.max(0, end - 12), Math.max(0, end));
+  }
+  var byT = /** @type {Record<number, dayBucket|undefined>} */ ({});
+  for (i = 0; i < H.length; i++) byT[H[i].t] = H[i];
+  var today = new Date();
+  var from = new Date(today.getFullYear(), today.getMonth(), today.getDate() - S.range * (skip + 1) + 1);
+  for (i = 0; i < S.range; i++) {
+    var t = new Date(from.getFullYear(), from.getMonth(), from.getDate() + i).getTime();
+    out.push(byT[t] || zeroDay(t));
+  }
+  return out;
+}
+
+/** @param {dayBucket[]} B @returns {string} */
+function rangeSwitcher(B) {
+  /** @type {[number, string][]} */
+  var opts = [[7, '7 days'], [30, '30 days'], [90, '90 days'], [365, '12 months']];
+  var h = '<div class="ranges">', i;
+  for (i = 0; i < opts.length; i++) {
+    h += '<button type="button" data-r="' + opts[i][0] + '" class="' + (S.range === opts[i][0] ? 'on' : '') + '">' +
+      esc(opts[i][1]) + '</button>';
+  }
+  var span = B.length ? histLabel(B[0].t) + ' — ' + histLabel(B[B.length - 1].t) : '';
+  return h + '<span class="span">' + esc(span) + '</span></div>';
+}
+
+/** @returns {string} */
+function renderHistory() {
+  var i, b;
+  if (!H.length) {
+    return '<div class="wrap" style="padding-top:30px">' + rangeSwitcher([]) +
+      '<div class="note" style="margin-top:34px">reading the day buckets…</div></div>';
+  }
+
+  var B = histRange(0), P = histRange(1), monthly = S.range === 365;
+  var span = sumDays(B, 0), before = sumDays(P, 0);
+  /* Nothing is compared against a period of a different length, or an empty one.
+     "+∞%" against a week that predates the database is arithmetic, not a fact
+     about spend — and one rule here means the tile and the card cannot disagree
+     about whether there is anything to compare against. */
+  var prev = /** @type {dayBucket|null} */ ((P.length === B.length && dayCost(before) > 0) ? before : null);
+  var total = dayCost(span), avg = total / B.length;
+  var peak = B[0];
+  for (i = 1; i < B.length; i++) if (dayCost(B[i]) > dayCost(peak)) peak = B[i];
+  TIPDATA.days = B;
+
+  var h = '<div class="wrap" style="padding-top:30px;padding-bottom:72px">' + rangeSwitcher(B);
+
+  /* ---- tiles ---- */
+  var deltaTile;
+  if (prev) {
+    var prevTotal = dayCost(prev), pc = Math.round(((total - prevTotal) / prevTotal) * 100);
+    deltaTile = '<div><div class="cap">vs previous ' + esc(histPeriod()) + '</div>' +
+      '<div class="val" style="gap:5px"><span class="mid" style="color:' + (pc >= 0 ? MER : MRD) + '">' +
+      (pc >= 0 ? '&#9650;' : '&#9662;') + ' ' + Math.abs(pc) + '</span><span class="unit">%</span></div>' +
+      '<div class="tile-sub">' + fM(prevTotal, 2) + ' the ' + esc(histPeriod()) + ' before</div></div>';
+  } else {
+    deltaTile = '<div><div class="cap">Requests</div>' +
+      '<div class="val"><span class="mid">' + fC(span.n) + '</span></div>' +
+      '<div class="tile-sub">' + fC(span.err) + (span.err === 1 ? ' error' : ' errors') + ' across the range</div></div>';
+  }
+
+  h += '<div class="tiles" style="margin-top:34px">' +
+    '<div><div class="cap">Total spend</div>' +
+    '<div class="val"><span class="big" style="animation:' + anim('hist-total', total) + '">' + fM(total, 2) + '</span></div>' +
+    '<div class="tile-sub">priced requests only · ' + fC(span.n) + ' requests' +
+    (span.unpriced > 0 ? ' · ' + fC(span.unpriced) + ' unpriced' : '') + '</div></div>' +
+
+    '<div style="padding-top:5px"><div class="cap">Average</div>' +
+    '<div class="val" style="gap:5px"><span class="mid">' + fM(avg, 2) + '</span>' +
+    '<span class="unit">' + (monthly ? '/mo' : '/day') + '</span></div>' +
+    '<div class="tile-sub">cache hit ' + pct0(span.tok.read, span.tok.in + span.tok.read + span.tok.write) +
+    ' over the range</div></div>' +
+
+    '<div style="padding-top:5px"><div class="cap">Most expensive ' + (monthly ? 'month' : 'day') + '</div>' +
+    '<div class="val"><span class="mid">' + fM(dayCost(peak), 2) + '</span></div>' +
+    // With nothing spent there is no most expensive anything, and naming the
+    // first bucket in the range would be picking one at random.
+    '<div class="tile-sub">' + (total > 0 ? esc(histLabel(peak.t)) : '—') + '</div></div>' +
+
+    deltaTile + '</div>';
+
+  /* ---- the bars ---- */
+  var max = 0;
+  for (i = 0; i < B.length; i++) if (dayCost(B[i]) > max) max = dayCost(B[i]);
+  var scale = (max || 0.001) * 1.12; // headroom, so the tallest bar's own figure has somewhere to sit
+
+  h += '<div style="margin-top:44px"><div class="hdrline">' +
+    '<div class="cap">Spend · ' + (monthly ? 'by month' : 'by day') + ' <span class="sub">· peak ' +
+    fM(max, 2) + (monthly ? '/mo' : '/day') + ' · dashed line = average' +
+    // Never a silent $0: if anything in range had no rate, the total below it is short.
+    (span.unpriced > 0 ? ' · ' + fC(span.unpriced) + ' unpriced ' + (span.unpriced === 1 ? 'request' : 'requests') +
+      ' not in these bars' : '') + '</span></div>' +
+    legend(SPEND_LEGEND) + '</div>' +
+    '<div class="chart" style="height:180px">' +
+    '<div class="grid" style="top:25%"></div><div class="grid" style="top:50%"></div><div class="grid" style="top:75%"></div>' +
+    '<div class="grid" title="average" style="border-top:1px dashed rgba(255,255,255,0.22);bottom:' +
+    Math.min(97, (avg / scale) * 100).toFixed(1) + '%"></div><div class="cols">';
+
+  for (i = 0; i < B.length; i++) {
+    b = B[i];
+    // Its own figure, but only while there are few enough bars for the labels to
+    // sit apart. Past a dozen they collide into a grey smear. In full, never
+    // rounded to the nearest dollar: "$0" over a day that cost $0.37 is the one
+    // reading this page must not produce.
+    var lbl = B.length <= 12
+      ? '<span class="lbl" style="bottom:' + ((dayCost(b) / scale) * 100 + 2).toFixed(1) + '%">' + fUsd(dayCost(b)) + '</span>'
+      : '';
+    h += '<div class="col" data-h="' + i + '">' +
+      '<i style="height:' + hpc(b.cost.read, scale, 100) + ';background:' + MRD + '"></i>' +
+      '<i style="height:' + hpc(b.cost.in, scale, 100) + ';background:' + MIN + '"></i>' +
+      '<i style="height:' + hpc(b.cost.write, scale, 100) + ';background:' + MWR + '"></i>' +
+      '<i style="height:' + hpc(b.cost.out, scale, 100) + ';background:' + MOU + '"></i>' +
+      // A month with one bad afternoon in it is not a month that errored, so the
+      // tick is a daily fact only.
+      '<div class="err" style="height:' + (!monthly && b.err > 0 ? '3px' : '0') + '"></div>' + lbl + '</div>';
+  }
+  h += '</div></div>' + histAxis(B, monthly) + '</div>';
+
+  h += '<div class="two a"><div><div class="cap">Spend by model ' +
+    '<span class="sub">· priced per request, summed over the range</span></div>' + modelRows(B, total) + '</div>' +
+    '<div><div class="cap">Insights</div>' + histCards(span, prev, peak) + '</div></div>';
+
+  return h + histTable(B, monthly) + '</div>';
+}
+
+/** @param {dayBucket[]} B @param {boolean} monthly @returns {string} */
+function histAxis(B, monthly) {
+  var h = '<div class="axis">', i, step;
+  if (monthly) {
+    for (i = 0; i < B.length; i++) h += '<span>' + esc(dstr(B[i].t, { month: 'short' })) + '</span>';
+  } else if (S.range === 7) {
+    for (i = 0; i < B.length; i++) h += '<span>' + esc(dstr(B[i].t, { weekday: 'short' })) + '</span>';
+  } else {
+    // Too many days to name them all: six or so posts, then where it ends.
+    step = Math.ceil(B.length / 6);
+    for (i = 0; i < B.length - step; i += step) h += '<span>' + esc(dstr(B[i].t, { month: 'short', day: 'numeric' })) + '</span>';
+    h += '<span>today</span>';
+  }
+  return h + '</div>';
+}
+
+/* Which models the money went to. Go sums a day's spend per model as it prices
+   each request; this only adds those days together and ranks them. */
+/** @param {dayBucket[]} B @param {number} total @returns {string} */
+function modelRows(B, total) {
+  var by = sumDays(B, 0).models, names = [], m, i;
+  for (m in by) names.push(m);
+  names.sort(function (a, b) { return by[b] - by[a]; });
+
+  var h = '<div style="margin-top:6px">';
+  for (i = 0; i < names.length; i++) {
+    var c = MODELC[i % MODELC.length], usd = by[names[i]];
+    h += '<div class="mrow">' + swatch(c) +
+      '<span class="m ell" style="font-size:12px;color:#c9c9c9" title="' + esc(names[i]) + '">' + esc(shortModel(names[i])) + '</span>' +
+      '<span class="track"><i style="width:' + pctOf(usd, total) + ';background:' + c + '"></i></span>' +
+      '<span class="num r">' + pct0(usd, total) + '</span>' +
+      '<span class="num r" style="color:#ececec">' + fUsd(usd) + '</span></div>';
+  }
+  if (!names.length) h += '<div class="note" style="padding:12px 0">nothing priced in this range</div>';
+  return h + '</div>';
+}
+
+/** @param {dayBucket} span @param {dayBucket|null} prev the equal-length period before it, when there is one @param {dayBucket} peak @returns {string} */
+function histCards(span, prev, peak) {
+  var monthly = S.range === 365, i, w;
+  var hitNow = hitOf(span.tok), hitPrev = prev ? hitOf(prev.tok) : 0;
+
+  /* Nothing ran, so there is nothing to be insightful about. Three confident
+     cards over an empty range — a peak day, a heaviest weekday — would be the
+     page claiming a pattern it has no evidence for. */
+  if (span.n === 0) return '<div class="empty" style="padding:18px 0">Nothing recorded in this range yet.</div>';
+
+  /* Which weekday costs the most, per day it happened. Read off the WHOLE
+     history rather than the visible range: a rhythm is a claim about how someone
+     works, and one week of data is not evidence of one. */
+  var cost = [0, 0, 0, 0, 0, 0, 0], days = [0, 0, 0, 0, 0, 0, 0];
+  for (i = 0; i < H.length; i++) {
+    w = new Date(H[i].t).getDay();
+    cost[w] += dayCost(H[i]);
+    days[w]++;
+  }
+  var bi = new Date(H[0].t).getDay();
+  for (i = 0; i < 7; i++) if (perDay(cost[i], days[i]) > perDay(cost[bi], days[bi])) bi = i;
+  var bt = H[0].t; // a real date that fell on that weekday, so it can be named in the reader's locale
+  for (i = 0; i < H.length; i++) if (new Date(H[i].t).getDay() === bi) { bt = H[i].t; break; }
+
+  /** @type {[string, string, string, string, string][]} tag, colour, figure, title, body */
+  var cards = [
+    ['peak', MWR, fUsd(dayCost(peak)),
+      histLabel(peak.t) + ' was the most expensive ' + (monthly ? 'month' : 'day'),
+      fC(peak.n) + ' requests across ' + fC(peak.sessions) + (peak.sessions === 1 ? ' session' : ' sessions') + '.'],
+    ['cache', MRD, Math.round(hitNow * 100) + '%',
+      'Cache hit ' + (hitPrev > 0
+        ? (hitNow >= hitPrev ? 'up from ' : 'down from ') + Math.round(hitPrev * 100) + '% the ' + histPeriod() + ' before'
+        : 'across the range'),
+      'Cache reads bill at 0.1× fresh input — the gap between these bars is mostly this number.'],
+    ['rhythm', MIN, fUsd(perDay(cost[bi], days[bi])) + '/day',
+      dstr(bt, { weekday: 'long' }) + 's are the heaviest day',
+      'Averaged over the ' + fC(H.length) + (H.length === 1 ? ' day' : ' days') + ' that recorded anything.']
+  ];
+
+  var h = '<div class="cards one">';
+  for (i = 0; i < cards.length; i++) {
+    h += '<div class="card"><div class="top">' +
+      '<span class="tag" style="color:' + cards[i][1] + '">' + esc(cards[i][0]) + '</span>' +
+      '<span class="usd">' + esc(cards[i][2]) + '</span></div>' +
+      '<div class="t">' + esc(cards[i][3]) + '</div><div class="b">' + esc(cards[i][4]) + '</div></div>';
+  }
+  return h + '</div>';
+}
+
+/** @param {dayBucket[]} B @param {boolean} monthly @returns {string} */
+function histTable(B, monthly) {
+  var h = '<div style="margin-top:52px"><div class="cap">' + (monthly ? 'Months' : 'Days') +
+    ' <span class="sub">· newest first</span></div>' +
+    '<div class="dgrid shead"><span>' + (monthly ? 'Month' : 'Day') + '</span><span class="r">Req</span>' +
+    '<span class="r">Sessions</span><span>Cost mix</span><span class="r">Hit</span><span class="r">Cost</span></div>';
+
+  for (var i = B.length - 1; i >= 0; i--) {
+    var b = B[i], c = b.cost, t = b.tok;
+    var when = monthly
+      ? esc(dstr(b.t, { month: 'short', year: 'numeric' }))
+      : '<span class="wd m">' + esc(dstr(b.t, { weekday: 'short' })) + '</span>' + esc(dstr(b.t, { month: 'short', day: 'numeric' }));
+    h += '<div class="dgrid drow" data-h="' + i + '">' +
+      '<span class="dday">' + when + '</span>' +
+      '<span class="num r">' + fC(b.n) + '</span>' +
+      '<span class="num r">' + fC(b.sessions) + '</span>' +
+      mix(c.read || 0, c.in || 0, c.write || 0, c.out || 0) +
+      '<span class="num r">' + pct0(t.read, t.in + t.read + t.write) + '</span>' +
+      '<span class="num r" style="color:#ececec">' + fM(dayCost(b), 2) + '</span></div>';
+  }
+  return h + '</div>';
 }
 
 /* ---------- the session trace ----------
@@ -1909,9 +2274,14 @@ function render(quiet) {
   var app = $('#app');
   var graph = document.querySelector('.flow-graph');
   var scrolled = graph ? graph.scrollLeft : 0;
+  var view = viewFromURL(), i;
+
+  // The header tabs live outside #app, so they are marked here rather than drawn.
+  var tabs = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-view]'));
+  for (i = 0; i < tabs.length; i++) tabs[i].className = tabs[i].getAttribute('data-view') === view ? 'on' : '';
 
   app.className = quiet ? 'quiet' : '';
-  app.innerHTML = S.sid ? renderTrace() : renderHome();
+  app.innerHTML = S.sid ? renderTrace() : (view === 'history' ? renderHistory() : renderHome());
 
   if (quiet && scrolled) {
     graph = document.querySelector('.flow-graph');
@@ -1922,6 +2292,43 @@ function render(quiet) {
 
 function wire() {
   var i, els;
+
+  // the header's two screens
+  els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-view]'));
+  for (i = 0; i < els.length; i++) els[i].onclick = (function (view) {
+    /** @param {MouseEvent} e */
+    return function (e) {
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      hideTip();
+      navigateView(view);
+    };
+  })(String(els[i].getAttribute('data-view')));
+
+  // the history range switcher
+  els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-r]'));
+  for (i = 0; i < els.length; i++) els[i].onclick = (function (r) {
+    return function () { S.range = r; hideTip(); render(); };
+  })(Number(els[i].getAttribute('data-r')));
+
+  // one history bucket, hovered on its bar or on its row in the table
+  els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-h]'));
+  for (i = 0; i < els.length; i++) {
+    els[i].onmouseenter = (function (b) {
+      /** @param {MouseEvent} ev */
+      return function (ev) {
+        /** @type {string[][]} */
+        var rows = [[MRD, 'cache read', fUsd(b.cost.read)], [MIN, 'fresh input', fUsd(b.cost.in)],
+                    [MWR, 'cache write', fUsd(b.cost.write)], [MOU, 'output', fUsd(b.cost.out)]];
+        if (b.err > 0) rows.push([MER, 'errors', String(b.err)]);
+        if (b.unpriced > 0) rows.push(['rgba(217,160,78,0.45)', 'unpriced', String(b.unpriced)]);
+        showTip(ev, tipHtml(histLabel(b.t) + ' · ' + fC(b.n) + (b.n === 1 ? ' request' : ' requests'), rows,
+          fM(dayCost(b), 2) + ' total · hit ' + pct0(b.tok.read, b.tok.in + b.tok.read + b.tok.write) +
+          ' · ' + fC(b.sessions) + (b.sessions === 1 ? ' session' : ' sessions')));
+      };
+    })(/** @type {dayBucket} */ (TIPDATA.days[Number(els[i].getAttribute('data-h'))] || zeroDay(0)));
+    els[i].onmouseleave = hideTip;
+  }
 
   // sessions → trace
   els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-sid]'));
@@ -2072,8 +2479,22 @@ function poll() {
     // snaps it back under the cursor.
     var ret = /** @type {HTMLSelectElement} */ ($('#ret'));
     if (document.activeElement !== ret) ret.value = store.retention || 'off';
-    if (S.sid) pollTrace(S.sid, false, true); else render(true);
+    if (S.sid) pollTrace(S.sid, false, true);
+    else if (viewFromURL() === 'history') pollHistory(true);
+    else render(true);
   }).catch(function () { /* the server is restarting; the next poll picks it up */ });
+}
+
+/* The day buckets, while that screen is open and never otherwise. It is the same
+   lifetime scan /api/stats already pays for on every poll, which is what lets
+   today's bar keep growing while it is being looked at. */
+/** @param {boolean} [quiet] the 2s poll, not a click */
+function pollHistory(quiet) {
+  fetch('/api/history').then(function (r) { return r.json(); }).then(/** @param {historyView|null} j */ function (j) {
+    if (!j || S.sid || viewFromURL() !== 'history') return; // they navigated away while it was in flight
+    H = j.days || [];
+    render(quiet);
+  }).catch(function () { /* next poll */ });
 }
 
 /** @param {string} sid @param {boolean} flow @param {boolean} [quiet] the 2s poll, not a click */
@@ -2121,6 +2542,17 @@ function showSession(sid) {
   if (sid) pollTrace(sid, false);
 }
 
+/** Switch screens. The view is read back off the URL by render, so pushing the
+ * location IS the state change — there is nothing else to keep in step.
+ * @param {string} view overview | history */
+function navigateView(view) {
+  var target = viewURL(view);
+  var current = window.location.pathname + window.location.search + window.location.hash;
+  if (target !== current) window.history.pushState(null, '', target);
+  showSession(null);
+  if (view === 'history') pollHistory(false);
+}
+
 /** @param {string|null} sid @param {boolean} replace */
 function navigateSession(sid, replace) {
   var target = sessionURL(sid);
@@ -2149,8 +2581,12 @@ TIP = $('#tip');
 $('#scrim').onclick = closeInsp;
 window.addEventListener('keydown', function (e) {
   if (e.key !== 'Escape') return;
+  // Leaving a screen by key takes any open tooltip with it: the element it was
+  // anchored to is about to be replaced, and no mouseleave will ever fire for it.
+  hideTip();
   if (S.id !== null) closeInsp();
   else if (S.sid) navigateSession(null, false);
+  else if (viewFromURL() === 'history') navigateView('overview');
 });
 window.addEventListener('popstate', function () {
   showSession(sessionFromURL());
