@@ -141,6 +141,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,'Helvetic
 .flow-dot{width:6px;height:6px;border-radius:50%;display:block}.flow-dot.user{background:#ededed}.flow-dot.result{background:#d9a04e}.flow-dot.call{background:#5aa2f7}.flow-dot.spawn{background:#a78bfa}
 .flow-list{margin-top:19px}
 .flow-turn{position:relative;display:grid;grid-template-columns:24px minmax(0,1fr);min-height:54px;padding-bottom:14px;animation:ttRowIn .22s ease-out both}.flow-turn.err{opacity:.78}
+/* A frame drawn by the 2s poll re-uses this markup for detail that is already
+   on screen and being read. Playing the entry animation again would make it
+   twitch every two seconds; the numbers still update underneath. */
+#app.quiet .flow-turn{animation:none}
 .flow-rail{position:relative}.flow-rail:before{content:'';position:absolute;left:4px;top:8px;bottom:-14px;width:1px;background:rgba(255,255,255,.12)}.flow-turn:last-child .flow-rail:before{display:none}.flow-rail span{position:absolute;z-index:1;top:5px;left:0;width:9px;height:9px;border-radius:50%;background:#5aa2f7;border:2px solid #11151c;box-shadow:0 0 0 2px rgba(90,162,247,.13)}
 .flow-body{min-width:0}.flow-meta{display:flex;align-items:center;gap:9px;font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:#5f5f5f}.flow-status{margin-left:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:0}
 .flow-ask{display:flex;gap:10px;align-items:baseline;margin-top:7px;line-height:1.45}.flow-ask span,.flow-kind{flex:none;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9px;letter-spacing:.11em;color:#8f8f8f}.flow-ask strong{font-size:12.5px;font-weight:500;color:#e8e8e8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
