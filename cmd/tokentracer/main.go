@@ -195,6 +195,7 @@ type app struct {
 	handler  http.Handler
 	store    *store.Store
 	recorder *record.Recorder
+	proxy    *proxy.Proxy
 
 	stopSweep chan struct{} // closed to end the retention sweeper
 	sweepDone chan struct{} // closed when it has ended
@@ -256,6 +257,7 @@ func newApp(cfg config) (*app, error) {
 		handler:   mux,
 		store:     st,
 		recorder:  rec,
+		proxy:     p,
 		stopSweep: make(chan struct{}),
 		sweepDone: make(chan struct{}),
 	}
@@ -273,6 +275,9 @@ func (a *app) close() {
 	close(a.stopSweep)
 	<-a.sweepDone
 
+	// Shutdown ignores hijacked WebSockets. End them while the Recorder still
+	// accepts the final partial Exchange from any response that was in flight.
+	a.proxy.Close()
 	a.recorder.Close()
 	a.store.Close()
 }

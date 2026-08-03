@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"strings"
 	"sync/atomic"
@@ -34,6 +35,8 @@ const (
 type Proxy struct {
 	upstream *url.URL
 	client   *http.Client
+	upgrade  http.Handler
+	sockets  *webSocketRegistry
 	sink     record.Sink
 }
 
@@ -51,11 +54,41 @@ func New(upstream string, sink record.Sink) (*Proxy, error) {
 	// record. We strip the client's Accept-Encoding for the same reason.
 	tr.DisableCompression = true
 
+	sockets := newWebSocketRegistry()
+	p := &Proxy{upstream: u, client: &http.Client{Transport: tr}, sockets: sockets, sink: sink}
+	p.upgrade = &httputil.ReverseProxy{
+		Director: func(r *http.Request) {
+			path, rawPath := r.URL.Path, r.URL.EscapedPath()
+			r.URL.Scheme = u.Scheme
+			r.URL.Host = u.Host
+			r.URL.Path = strings.TrimSuffix(u.Path, "/") + path
+			r.URL.RawPath = strings.TrimSuffix(u.EscapedPath(), "/") + rawPath
+			r.Host = u.Host
+			// Keeping frames uncompressed lets the recorder inspect their JSON
+			// without changing what Codex or the Responses API sends.
+			r.Header.Del("Sec-WebSocket-Extensions")
+		},
+		Transport: &webSocketTransport{base: tr, sink: sink, sockets: sockets},
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			http.Error(w, "tokentracer: upstream unreachable: "+err.Error(), http.StatusBadGateway)
+		},
+	}
+
 	// No client timeout — a long generation is not a hung request.
-	return &Proxy{upstream: u, client: &http.Client{Transport: tr}, sink: sink}, nil
+	return p, nil
 }
 
+// Close ends every upgraded connection. HTTP server shutdown does not own
+// hijacked WebSockets, so callers must close the Proxy before closing its Sink.
+func (p *Proxy) Close() { p.sockets.Close() }
+
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if websocketUpgrade(r.Header) {
+		ctx := context.WithValue(r.Context(), webSocketPathKey{}, r.URL.Path)
+		p.upgrade.ServeHTTP(w, r.WithContext(ctx))
+		return
+	}
+
 	start := time.Now()
 
 	reqBody, err := io.ReadAll(r.Body)
@@ -148,6 +181,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		RespTruncated: tee.truncated,
 		ClientAborted: aborted.Load(),
 	})
+}
+
+func websocketUpgrade(h http.Header) bool {
+	if !strings.EqualFold(strings.TrimSpace(h.Get("Upgrade")), "websocket") {
+		return false
+	}
+	for _, value := range h.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // recordable is the proxy's filter, and the Recorder's licence to assume every
