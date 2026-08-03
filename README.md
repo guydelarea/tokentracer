@@ -18,6 +18,7 @@
 <p align="center">
   <a href="#quickstart">Quickstart</a> &middot;
   <a href="#dashboard">Dashboard</a> &middot;
+  <a href="#supported-clients">Supported clients</a> &middot;
   <a href="#what-it-records">What it records</a> &middot;
   <a href="#configuration">Configuration</a> &middot;
   <a href="#contributing">Contributing</a>
@@ -30,6 +31,8 @@
 ---
 
 **TokenTracer** sits between an LLM client and its model API. It forwards requests unchanged, streams responses straight back to the client, and records the traffic locally for inspection.
+
+It reads three wire formats — **Anthropic Messages** (direct or via Vertex AI), **OpenAI Responses** (over HTTPS and Codex's WebSocket), and **OpenAI-compatible Chat Completions** — so [Claude Code](https://claude.com/claude-code), [Codex](https://developers.openai.com/codex), [OpenCode](https://opencode.ai) and [Pi](https://pi.dev) all land in the same dashboard, session-grouped and priced the same way.
 
 See what each coding-agent request costs, what is filling the context window, and the request and decoded response behind every entry. One static Go binary, one dependency, no build step.
 
@@ -67,6 +70,8 @@ Pick 2 for **Vertex AI** and it asks for your region (blank = global), pointing 
 Pick 3 for the existing ChatGPT OAuth login used by Codex, OpenCode, or Pi, or
 4 when the client authenticates with an OpenAI API key. TokenTracer never reads
 or stores that credential; the client's `Authorization` header passes through.
+Pick 1 for anything speaking the Anthropic API — Claude Code, Pi, and
+OpenCode's `anthropic` provider alike.
 
 Then it listens on `:8787` and forwards upstream, writing `./tokentracer.db`. In another terminal, launch your client through the proxy — the startup log prints the exact line for your backend:
 
@@ -82,6 +87,9 @@ codex -c 'openai_base_url="http://localhost:8787"'
 
 # OpenCode (ChatGPT login or OpenAI API)
 OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode
+
+# OpenCode on Anthropic — override that provider instead (pick 1 in setup)
+OPENCODE_CONFIG_CONTENT='{"provider":{"anthropic":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode
 
 # Pi (ChatGPT login, OpenAI API, or Anthropic API)
 # Add the matching provider override to ~/.pi/agent/models.json, then run pi.
@@ -100,37 +108,40 @@ receives its own authentication and wire format.
 
 Open [localhost:8787/dashboard](http://localhost:8787/dashboard) and work as usual. Rows land within two seconds.
 
-### Verify OpenCode
+### Verify your client
 
-This sends one real prompt through your OpenAI or ChatGPT account, so use a
-small model if you prefer. It does not save an OpenCode configuration or read
-your credentials.
+This sends one real prompt through your account, so use a small model if you
+prefer. It saves no client configuration and reads no credentials.
 
-1. Start TokenTracer and select either *Codex / OpenCode — ChatGPT login* or
-   *Codex / OpenCode — OpenAI API key* in the setup wizard:
+1. Run the setup wizard and pick the option matching how your client
+   authenticates — *ChatGPT login* or *OpenAI API key* for Codex, OpenCode and
+   Pi on OpenAI; *Anthropic API* for Claude Code, OpenCode and Pi on Anthropic:
 
    ```bash
    go run ./cmd/tokentracer setup
    go run ./cmd/tokentracer
    ```
 
-2. In another terminal, list the OpenAI models available to your OpenCode
-   account and substitute one for `<model>` below:
+2. In another terminal, launch your client with the line the startup log
+   printed for your backend, and send it one prompt:
+   `Reply with exactly: TokenTracer works`. OpenCode can do it in one
+   non-interactive command — `opencode models openai` lists the models your
+   account can use, and one of them substitutes for `<model>`:
 
    ```bash
-   opencode models openai
    OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"http://localhost:8787"}}}}' \
      opencode run --model openai/<model> 'Reply with exactly: TokenTracer works'
    ```
 
 3. Open [localhost:8787/dashboard](http://localhost:8787/dashboard). Within
-   two seconds, it should show one OpenAI session containing the test prompt,
-   its token usage, and its API-equivalent cost. Click the session to inspect
-   the request and assembled response.
+   two seconds, it should show one session containing the test prompt, its
+   token usage, and its API-equivalent cost. Click the session to inspect the
+   request and assembled response.
 
-If no session appears, make sure the selected OpenCode model begins with
-`openai/`, keep TokenTracer running while you invoke OpenCode, and confirm the
-setup wizard selected the same authentication method that OpenCode uses.
+If no session appears: keep TokenTracer running while you invoke the client,
+confirm the wizard selected the same authentication method the client uses, and
+check that the client is actually on the proxied provider — for OpenCode, that
+the model begins with the provider you overrode, such as `openai/`.
 
 Build a static binary:
 
@@ -178,7 +189,7 @@ TokenTracer records the **Anthropic Messages API** (`POST /v1/messages`, streami
 | Claude Code via Vertex AI | Should work | Pick *Vertex AI* in the setup wizard, then `CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=http://localhost:8787` |
 | Anthropic Messages API client | Should work | Set its base URL to `http://localhost:8787` |
 | [Codex](https://developers.openai.com/codex) | Tested (WebSocket and HTTPS) | Pick *ChatGPT login* or *OpenAI API key*, then `codex -c 'openai_base_url="http://localhost:8787"'` |
-| [OpenCode](https://opencode.ai) | Tested with ChatGPT login; OpenAI-compatible providers supported | Pick *ChatGPT login* or *OpenAI API key*, then override OpenAI's [`baseURL`](https://opencode.ai/docs/providers) with `OPENCODE_CONFIG_CONTENT`. For a compatible non-OpenAI provider, point its own `baseURL` at the proxy after selecting *Other* in setup. |
+| [OpenCode](https://opencode.ai) | Tested with ChatGPT login; Anthropic and OpenAI-compatible providers supported | Pick the matching setup option, then override that provider's [`baseURL`](https://opencode.ai/docs/providers) with `OPENCODE_CONFIG_CONTENT` — `openai` for Responses, `anthropic` for Messages. For a compatible non-OpenAI provider, point its own `baseURL` at the proxy after selecting *Other* in setup. |
 | [Pi](https://pi.dev) | Supported for Anthropic, ChatGPT login, OpenAI Responses, and OpenAI-compatible Chat Completions providers | Pick the matching setup option, then set `providers.<provider>.baseUrl` in `~/.pi/agent/models.json` to `http://localhost:8787` and run `pi --provider <provider>`. |
 | OpenAI Responses or Chat Completions client | Should work | Set its base URL to `http://localhost:8787` |
 | Vendor-native OpenCode transports | Not yet | Direct Gemini, Bedrock, and other non-Anthropic/non-OpenAI wire protocols are proxied unchanged but not recorded. |
@@ -190,7 +201,7 @@ Codex's persistent Responses WebSocket is proxied bidirectionally. Each
 terminal response event arrives, so a long-lived socket still produces the same
 dashboard facts and captures as the HTTPS transport.
 
-Anthropic sessions are grouped by Claude Code's embedded `session_id`; Responses sessions use `prompt_cache_key` when clients send one. Chat Completions uses a request session key from `client_metadata`, `metadata`, or `user` when the client supplies one. Auxiliary model calls with no session key are still visible under `(no session id)`.
+Anthropic sessions are grouped by Claude Code's embedded `session_id`. Responses sessions use `prompt_cache_key` first, then a session or thread id in `client_metadata` or `metadata`, then `user`; Chat Completions uses the same fallbacks without the cache key. Auxiliary model calls with no session key are still visible under `(no session id)`.
 
 ### What it records
 
@@ -283,19 +294,21 @@ The tests run against a real capture from a real Claude Code session (`testdata/
 Layout:
 
 ```
-cmd/tokentracer     wiring, config, shutdown order
-internal/proxy      the client path: forward, stream, stamp, hand over. Zero parsing.
+cmd/tokentracer     wiring, config, setup wizard, shutdown order
+internal/proxy      the client path: forward, stream, stamp, hand over — over
+                    HTTPS and Codex's Responses WebSocket. Zero parsing.
 internal/record     the Recorder: never loses an exchange it saw
 internal/anthropic  vendor module: parse, break down, decode SSE. Pure functions.
-internal/openai     OpenAI Responses module. Pure functions.
+internal/openai     vendor module: Responses and Chat Completions. Pure functions.
 internal/wire       normalized seam used by the Recorder and dashboard
+internal/redact     credential shapes stripped from a capture before it is stored
 internal/billing    read-time pricing, generated rate table
 internal/store      SQLite: schema, one-transaction writes, three read queries
 internal/api        the fold — every number the dashboard shows — plus the routes
 web/                the dashboard, embedded with go:embed
 ```
 
-One wire dialect per package; the rest of the application only sees normalized vendor facts.
+One vendor per package — `internal/openai` owns both of OpenAI's dialects — and the rest of the application only sees normalized vendor facts.
 
 ### Contributing
 
@@ -320,6 +333,7 @@ Keep changes focused. Add a real test for non-trivial behavior — and prefer on
 - [x] Capture auto-pruning
 - [x] OpenAI Responses parsing (Codex, OpenCode, Pi)
 - [x] OpenAI Chat Completions parsing (OpenCode/Pi-compatible providers and other compatible clients)
+- [x] Codex's persistent Responses WebSocket, recorded exchange by exchange
 
 ### License
 
