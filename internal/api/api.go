@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/guydelarea/tokentracer/internal/anthropic"
 	"github.com/guydelarea/tokentracer/internal/billing"
 	"github.com/guydelarea/tokentracer/internal/store"
+	"github.com/guydelarea/tokentracer/internal/wire"
 	"github.com/guydelarea/tokentracer/web"
 )
 
@@ -159,9 +159,11 @@ func (s *server) trace(w http.ResponseWriter, r *http.Request) {
 	// optional: a capture can be deleted, and everything folded from the fact
 	// rows survives that.
 	set, gone := s.toolsOf(sid, rows[len(rows)-1])
-	var results []anthropic.ResultItem
-	if body, err := s.latestBody(rows); err == nil {
-		results = anthropic.ResultsInContext(body)
+	var results []wire.ResultItem
+	if inspection, err := s.latestInspection(rows); err == nil {
+		if inspection.Kind != wire.Unknown {
+			results = inspection.Results
+		}
 	} else {
 		gone = true
 	}
@@ -219,9 +221,9 @@ func (s *server) childPrompts(rows []store.Row, agents []agentRow) map[string][]
 		if err != nil {
 			continue
 		}
-		facts, err := anthropic.ParseRequest(body)
-		if err == nil && strings.TrimSpace(facts.FirstText) != "" {
-			key := strings.TrimSpace(facts.FirstText)
+		inspection, err := wire.InspectRequestAt(endpointPath(r.Endpoint), body)
+		if err == nil && strings.TrimSpace(inspection.Facts.FirstText) != "" {
+			key := strings.TrimSpace(inspection.Facts.FirstText)
 			out[key] = append(out[key], a)
 		}
 	}
@@ -242,13 +244,15 @@ func (s *server) flowOf(rows []store.Row, children map[string][]agentRow) []flow
 		turn.Captured = true
 		// Row.Label is intentionally the session opener. The graph needs the
 		// newest human text in this request's full conversation instead.
-		turn.Ask = anthropic.LatestUserText(req)
-		for _, result := range anthropic.ToolResults(req) {
-			name := called[result.ToolUseID]
-			if name == "" {
-				name = "earlier tool"
+		if inspection, inspectErr := wire.InspectRequestAt(endpointPath(r.Endpoint), req); inspectErr == nil {
+			turn.Ask = inspection.LatestUserText
+			for _, result := range inspection.ToolResults {
+				name := called[result.ToolUseID]
+				if name == "" {
+					name = "earlier tool"
+				}
+				turn.Results = append(turn.Results, flowResult{ToolUseID: result.ToolUseID, Name: name, Bytes: result.Bytes})
 			}
-			turn.Results = append(turn.Results, flowResult{ToolUseID: result.ToolUseID, Name: name, Bytes: result.Bytes})
 		}
 		for _, call := range flowCalls(resp) {
 			called[call.ID] = call.Name
@@ -284,19 +288,19 @@ func linkSubagents(turns []flowTurn, children map[string][]agentRow) {
 	}
 }
 
-// latestBody is the newest captured request body in the session — the context as
-// it stands now, which is the only one the cut list can be computed against.
-func (s *server) latestBody(rows []store.Row) ([]byte, error) {
+// latestInspection reads the newest captured request in a session — the context
+// as it stands now, which is the only one the cut list can be computed against.
+func (s *server) latestInspection(rows []store.Row) (wire.RequestInspection, error) {
 	for i := len(rows) - 1; i >= 0; i-- {
 		body, _, err := s.st.Capture(rows[i].ID)
 		if err == nil && len(body) > 0 {
-			return body, nil
+			return wire.InspectRequestAt(endpointPath(rows[i].Endpoint), body)
 		}
 		if !errors.Is(err, store.ErrNoCapture) {
-			return nil, err
+			return wire.RequestInspection{}, err
 		}
 	}
-	return nil, store.ErrNoCapture
+	return wire.RequestInspection{}, store.ErrNoCapture
 }
 
 // toolsets resolves the schemas for every session in the scan, from cache where
@@ -361,19 +365,23 @@ func (s *server) readTools(sid string) (toolset, error) {
 	if err != nil {
 		return toolset{}, err
 	}
-	bd, err := anthropic.BreakdownRequest(body)
+	endpoint, err := s.st.Endpoint(id)
 	if err != nil {
 		return toolset{}, err
 	}
-	return toolset{Items: bd.Tools}, nil
+	inspection, err := wire.InspectRequestAt(endpointPath(endpoint), body)
+	if err != nil {
+		return toolset{}, err
+	}
+	return toolset{Items: inspection.Breakdown.Tools}, nil
 }
 
 // captureView is the /api/capture contract: the two blobs, plus the breakdown
 // folded server-side so the page never computes a number it is only meant to draw.
 type captureView struct {
-	Request   json.RawMessage      `json:"request"`
-	Response  json.RawMessage      `json:"response,omitempty"`
-	Breakdown *anthropic.Breakdown `json:"breakdown,omitempty"`
+	Request   json.RawMessage `json:"request"`
+	Response  json.RawMessage `json:"response,omitempty"`
+	Breakdown *wire.Breakdown `json:"breakdown,omitempty"`
 }
 
 func (s *server) capture(w http.ResponseWriter, r *http.Request) {
@@ -396,8 +404,11 @@ func (s *server) capture(w http.ResponseWriter, r *http.Request) {
 	}
 
 	view := captureView{Request: rawOrNull(reqJSON), Response: rawOrNull(respJSON)}
-	if bd, err := anthropic.BreakdownRequest(reqJSON); err == nil {
-		view.Breakdown = &bd
+	endpoint, endpointErr := s.st.Endpoint(id)
+	if endpointErr == nil {
+		if inspection, err := wire.InspectRequestAt(endpointPath(endpoint), reqJSON); err == nil {
+			view.Breakdown = &inspection.Breakdown
+		}
 	}
 	// A capture we can't break down still shows its raw bodies: a body we failed
 	// to parse is exactly the one worth looking at.
@@ -406,6 +417,14 @@ func (s *server) capture(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(view); err != nil {
 		log.Printf("tokentracer: encoding capture %d: %v", id, err)
 	}
+}
+
+func endpointPath(endpoint string) string {
+	_, path, ok := strings.Cut(endpoint, " ")
+	if !ok {
+		return ""
+	}
+	return path
 }
 
 // rawOrNull keeps the blob verbatim, and stays valid JSON if it isn't.

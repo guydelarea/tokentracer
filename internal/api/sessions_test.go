@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/guydelarea/tokentracer/internal/anthropic"
 	"github.com/guydelarea/tokentracer/internal/store"
+	"github.com/guydelarea/tokentracer/internal/wire"
 )
 
 // su builds one row of the lifetime scan, the projection the sessions table
@@ -132,7 +132,7 @@ func TestSessionCutList(t *testing.T) {
 	quiet := su("s1", 4, 1000, 0, 0, 100)
 	quiet.ToolCount = 2
 
-	tools := map[string]toolset{"s1": {Items: []anthropic.ToolItem{
+	tools := map[string]toolset{"s1": {Items: []wire.ToolItem{
 		{Name: "Bash", Bytes: 400},
 		{Name: "NeverCalled", Bytes: 4000},
 	}}}

@@ -80,6 +80,49 @@ assert.match(
   'modified clicks must retain native link behavior'
 );
 
+// The inspector gets each vendor's original wire body. Its adapter must expose
+// OpenAI Responses instructions and Chat Completions developer messages as the
+// system prompt instead of assuming Anthropic's system/messages shape.
+const helpersStart = source.indexOf('function requestView(req)');
+const helpersEnd = source.indexOf('/* foldPre renders', helpersStart);
+assert.ok(helpersStart >= 0 && helpersEnd > helpersStart, 'inspector wire adapters must exist');
+const { requestView, responseBlocks } = new Function(
+  'isArr', 'inspText',
+  source.slice(helpersStart, helpersEnd) + '; return { requestView, responseBlocks };'
+)(
+  (v) => Object.prototype.toString.call(v) === '[object Array]',
+  (v) => typeof v === 'string' ? v : (v == null ? '' : JSON.stringify(v, null, 2))
+);
+
+const responsesRequest = requestView({
+  instructions: 'You are OpenCode.',
+  input: [
+    { role: 'user', content: [{ type: 'input_text', text: 'Fix the parser' }] },
+    { type: 'function_call', name: 'read', arguments: '{"path":"parser.go"}' }
+  ]
+});
+assert.equal(responsesRequest.system, 'You are OpenCode.', 'Responses instructions must render as the system prompt');
+assert.equal(responsesRequest.messages.length, 2, 'Responses input items must render as history');
+
+const chatRequest = requestView({
+  messages: [
+    { role: 'developer', content: 'Use tools.' },
+    { role: 'user', content: 'Run the tests.' }
+  ]
+});
+assert.equal(chatRequest.system, 'Use tools.', 'Chat Completions developer messages must render as the system prompt');
+assert.equal(chatRequest.messages.length, 1, 'system/developer messages must not duplicate into history');
+
+const responseItems = responseBlocks({
+  output: [
+    { type: 'message', content: [{ type: 'output_text', text: 'Done.' }] },
+    { type: 'function_call', name: 'bash', arguments: '{"command":"go test ./..."}' }
+  ]
+});
+assert.equal(responseItems.length, 2, 'Responses output must render messages and tool calls');
+assert.equal(responseItems[0].type, 'output_text');
+assert.equal(responseItems[1].type, 'function_call');
+
 // Exercise the shipped navigation functions with a small browser/history
 // double. This covers the state transitions behind direct loads and popstate,
 // not just the URL string helpers.

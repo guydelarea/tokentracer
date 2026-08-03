@@ -421,6 +421,20 @@ func (s *Store) Capture(id int64) (reqJSON, respJSON []byte, err error) {
 	return reqJSON, respJSON, nil
 }
 
+// Endpoint returns the recorded HTTP endpoint for an exchange. It lets
+// capture-time readers distinguish wire dialects that share the same JSON keys.
+func (s *Store) Endpoint(id int64) (string, error) {
+	var endpoint string
+	err := s.db.QueryRow(`SELECT endpoint FROM requests WHERE id = ?`, id).Scan(&endpoint)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNoCapture
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: read endpoint %d: %w", id, err)
+	}
+	return endpoint, nil
+}
+
 // Setting reads a persisted dashboard setting. A key that was never set reads
 // back as "" with no error: absent and empty are the same answer here, and the
 // caller's default is a better one than an error it would have to translate.

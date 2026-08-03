@@ -152,8 +152,8 @@ type byteSplit struct {
 	Messages int64 `json:"messages"`
 }
 
-// shape is where a reply's output tokens went. An estimate — see
-// anthropic.SplitOutput — and the only one on the wire.
+// shape is where a reply's output tokens went. The wire adapters make the
+// estimate while they still have the response blocks in hand.
 type shape struct {
 	Think int64 `json:"think"`
 	Text  int64 `json:"text"`

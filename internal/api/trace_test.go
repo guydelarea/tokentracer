@@ -72,6 +72,22 @@ func TestLinkSubagentsLeavesDuplicatePromptsUnlinked(t *testing.T) {
 	}
 }
 
+func TestFlowCallsReadsOpenAIFunctionCalls(t *testing.T) {
+	body := []byte(`{"object":"response","output":[
+	  {"type":"function_call","call_id":"call_1","name":"spawn_agent","arguments":"{\"message\":\"inspect billing\"}"}
+	]}`)
+	calls := flowCalls(body)
+	if len(calls) != 1 {
+		t.Fatalf("flowCalls = %+v", calls)
+	}
+	if calls[0].ID != "call_1" || calls[0].Name != "spawn_agent" || !calls[0].Agent {
+		t.Errorf("call identity = %+v", calls[0])
+	}
+	if calls[0].Summary != "inspect billing" || calls[0].prompt != "inspect billing" {
+		t.Errorf("call prompt = %+v", calls[0])
+	}
+}
+
 // The claim the trace exists to make: this request broke the cache, and THIS is
 // what broke it. The prefix chain is cumulative over tools → system → messages,
 // so the first index at which two requests diverge is not a hint about the cause

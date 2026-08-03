@@ -11,10 +11,9 @@ import (
 	"time"
 )
 
-// Cache multipliers ride on the input base rate: Anthropic bills a cache read
-// at 0.1x the input rate, a 5-minute cache write at 1.25x, and a 1-hour write
-// at 2.0x. These hold for every current Claude model, which is why they live
-// here as constants instead of per-rate fields.
+// Cache multipliers ride on the input base rate. Anthropic and OpenAI both bill
+// reads at 0.1x and writes at 1.25x; Anthropic's 1-hour writes bill at 2.0x.
+// These hold for every model currently represented in Rates.
 const (
 	ReadMult    = 0.1
 	Write5mMult = 1.25
@@ -27,6 +26,16 @@ const (
 // that is nobody's fault. The trace has to know the number to say so, and it
 // belongs here with the multipliers rather than as a literal in the browser.
 const CacheTTL = 5 * time.Minute
+
+// CacheTTLFor is the minimum lifetime whose expiry can explain an otherwise
+// byte-identical cache rewrite. GPT-5.6 defaults to a 30-minute prompt-cache
+// TTL; current Claude cache-control blocks default to five minutes.
+func CacheTTLFor(model string) time.Duration {
+	if strings.Contains(normalize(model), "gpt-5.6") {
+		return 30 * time.Minute
+	}
+	return CacheTTL
+}
 
 // What a cache break actually costs, as a share of the bill it produced.
 //
@@ -47,9 +56,13 @@ const (
 // session ran on, and scoring a 1M-context session against 200k would show it as
 // five times as full as it is.
 //
-// ponytail: two sizes, first match wins. Add a row when a tier ships a third.
+// ponytail: a few sizes, first match wins. Add a row when a tier ships another.
 func ContextWindow(model string) int64 {
-	if strings.Contains(normalize(model), "[1m]") {
+	normalized := normalize(model)
+	if strings.Contains(normalized, "gpt-5.6") {
+		return 1_050_000
+	}
+	if strings.Contains(normalized, "[1m]") {
 		return 1_000_000
 	}
 	return 200_000
@@ -95,8 +108,8 @@ type Rate struct {
 	LongCtxOutPerM   float64
 }
 
-// Usage is the token quartet exactly as the Anthropic API reports it: fresh
-// input, cache reads, cache writes split by TTL, and output.
+// Usage is the normalized token quartet reported by the upstream: fresh input,
+// cache reads, cache writes split by TTL, and output.
 type Usage struct {
 	In      int64
 	Read    int64
@@ -130,10 +143,8 @@ func Compute(rates []Rate, model string, u Usage, at time.Time) Bill {
 	in, out := r.InPerM, r.OutPerM
 
 	// The long-context premium applies strictly ABOVE the threshold, not at it:
-	// Anthropic prices input up to and including 200K at standard rates, so a
-	// request landing exactly on the boundary is still standard. Every input
-	// component counts toward the threshold, cache reads included — which is
-	// what pushes ordinary Claude Code turns over it.
+	// A request landing exactly on a published boundary is still standard. Every
+	// input component counts toward the threshold, cache reads included.
 	if r.LongCtxThreshold > 0 && u.In+u.Read+u.Write5m+u.Write1h > r.LongCtxThreshold {
 		in, out = r.LongCtxInPerM, r.LongCtxOutPerM
 	}

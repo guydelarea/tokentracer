@@ -129,13 +129,19 @@ func runSetup() {
 	fmt.Println("tokentracer: first-run setup — which client?")
 	fmt.Println("  1) Claude Code — Anthropic API (default)")
 	fmt.Println("  2) Claude Code — Vertex AI")
-	fmt.Println("  3) Other — paste an upstream base URL")
+	fmt.Println("  3) Codex / OpenCode — ChatGPT login")
+	fmt.Println("  4) Codex / OpenCode — OpenAI API key")
+	fmt.Println("  5) Other — paste an upstream base URL")
 
 	var up string
 	switch ask("Choice [1]: ") {
 	case "2":
 		up = vertexUpstream(ask("Vertex region, e.g. us-east5 (blank = global): "))
 	case "3":
+		up = "https://chatgpt.com/backend-api/codex"
+	case "4":
+		up = "https://api.openai.com/v1"
+	case "5":
 		if up = ask("Upstream base URL: "); up == "" {
 			up = "https://api.anthropic.com"
 		}
@@ -160,14 +166,27 @@ func env(key, def string) string {
 	return def
 }
 
-// launchLine is the one env-and-command line that points Claude Code at the
-// proxy. Vertex needs different env than Anthropic, and the upstream already
-// says which backend this is.
-func launchLine(cfg config) string {
+// launchLines are copy-paste commands that point clients at the proxy. The
+// upstream identifies the wire family; Codex and OpenCode use the same OpenAI
+// Responses endpoint but expose their base URL overrides differently.
+func launchLines(cfg config) []string {
+	base := "http://localhost:" + cfg.Port
 	if strings.Contains(cfg.Upstream, "googleapis") {
-		return fmt.Sprintf("CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=http://localhost:%s claude", cfg.Port)
+		return []string{"Claude Code: CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=" + base + " claude"}
 	}
-	return fmt.Sprintf("ANTHROPIC_BASE_URL=http://localhost:%s claude", cfg.Port)
+	if strings.Contains(cfg.Upstream, "api.openai.com") || strings.Contains(cfg.Upstream, "backend-api/codex") {
+		return []string{
+			fmt.Sprintf(`Codex: codex -c 'openai_base_url="%s"'`, base),
+			fmt.Sprintf(`OpenCode: OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"%s"}}}}' opencode`, base),
+		}
+	}
+	if strings.Contains(cfg.Upstream, "api.anthropic.com") {
+		return []string{
+			"Claude Code: ANTHROPIC_BASE_URL=" + base + " claude",
+			fmt.Sprintf(`OpenCode: OPENCODE_CONFIG_CONTENT='{"provider":{"anthropic":{"options":{"baseURL":"%s"}}}}' opencode`, base),
+		}
+	}
+	return []string{"OpenCode: set the selected provider's options.baseURL to " + base}
 }
 
 // app is the wiring: store → recorder → proxy, plus the dashboard reading the
@@ -288,7 +307,9 @@ func main() {
 
 	go func() {
 		log.Printf("tokentracer: http://%s → %s  (db: %s)", addr, cfg.Upstream, cfg.DBPath)
-		log.Printf("tokentracer: point your client at it — %s", launchLine(cfg))
+		for _, line := range launchLines(cfg) {
+			log.Printf("tokentracer: point your client at it — %s", line)
+		}
 		log.Printf("tokentracer: dashboard — http://localhost:%s/dashboard", cfg.Port)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("tokentracer: %v", err)

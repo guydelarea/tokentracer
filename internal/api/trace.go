@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/guydelarea/tokentracer/internal/anthropic"
 	"github.com/guydelarea/tokentracer/internal/billing"
 	"github.com/guydelarea/tokentracer/internal/store"
+	"github.com/guydelarea/tokentracer/internal/wire"
 )
 
 // The session trace: one session, everything it did, and what it should have
@@ -167,14 +167,14 @@ type traceView struct {
 	Activity []activityStat `json:"activity"` // costliest first
 	Buckets  []traceBucket  `json:"buckets"`
 
-	Tools        []toolRow              `json:"tools"` // largest schema first
-	Cut          []toolRow              `json:"cut"`   // …the never-called ones: the cut list
-	UnusedTok    int64                  `json:"unusedTok"`
-	CutUsd       float64                `json:"cutUsd"`
-	Results      []anthropic.ResultItem `json:"results"` // tool output sitting in the context
-	ResultBytes  int64                  `json:"resultBytes"`
-	ExploreBytes int64                  `json:"exploreBytes"`
-	ExploreCalls int                    `json:"exploreCalls"`
+	Tools        []toolRow         `json:"tools"` // largest schema first
+	Cut          []toolRow         `json:"cut"`   // …the never-called ones: the cut list
+	UnusedTok    int64             `json:"unusedTok"`
+	CutUsd       float64           `json:"cutUsd"`
+	Results      []wire.ResultItem `json:"results"` // tool output sitting in the context
+	ResultBytes  int64             `json:"resultBytes"`
+	ExploreBytes int64             `json:"exploreBytes"`
+	ExploreCalls int               `json:"exploreCalls"`
 
 	// Stateless: the session has spoken enough times for the cache to have paid
 	// off, and has never once had a cache read. Either the client sends no
@@ -246,16 +246,23 @@ type flowResult struct {
 func flowInput(raw json.RawMessage) (summary, prompt string) {
 	var in struct {
 		Command     string `json:"command"`
+		Cmd         string `json:"cmd"`
 		Path        string `json:"path"`
 		Query       string `json:"query"`
 		Prompt      string `json:"prompt"`
+		Message     string `json:"message"`
+		Task        string `json:"task"`
 		Description string `json:"description"`
 	}
 	if json.Unmarshal(raw, &in) != nil {
 		return "", ""
 	}
-	prompt = strings.TrimSpace(in.Prompt)
-	for _, s := range []string{in.Command, in.Path, in.Query, prompt, in.Description} {
+	for _, candidate := range []string{in.Prompt, in.Message, in.Task} {
+		if prompt = strings.TrimSpace(candidate); prompt != "" {
+			break
+		}
+	}
+	for _, s := range []string{in.Command, in.Cmd, in.Path, in.Query, prompt, in.Description} {
 		if s = strings.Join(strings.Fields(s), " "); s != "" {
 			if len([]rune(s)) > 120 {
 				return string([]rune(s)[:120]) + "…", prompt
@@ -267,17 +274,12 @@ func flowInput(raw json.RawMessage) (summary, prompt string) {
 }
 
 func flowCalls(body []byte) []flowCall {
-	var resp anthropic.Response
-	if json.Unmarshal(body, &resp) != nil {
-		return nil
-	}
 	var out []flowCall
-	for _, b := range resp.Content {
-		if b.Type != "tool_use" || b.Name == "" {
-			continue
-		}
-		summary, prompt := flowInput(b.Input)
-		out = append(out, flowCall{ID: b.ID, Name: b.Name, Summary: summary, Agent: b.Name == "Task" || b.Name == "Agent", prompt: prompt})
+	for _, call := range wire.ResponseCalls(body) {
+		summary, prompt := flowInput(call.Arguments)
+		agent := call.Name == "Task" || call.Name == "Agent" ||
+			call.Name == "task" || call.Name == "agent" || call.Name == "spawn_agent"
+		out = append(out, flowCall{ID: call.ID, Name: call.Name, Summary: summary, Agent: agent, prompt: prompt})
 	}
 	return out
 }
@@ -290,18 +292,24 @@ func flowCalls(body []byte) []flowCall {
 // for a turn that called something, so a new client's tools belong here.
 var exploreTools = map[string]bool{
 	"Read": true, "Grep": true, "Glob": true, "WebFetch": true, "WebSearch": true,
+	"read": true, "grep": true, "glob": true, "webfetch": true, "web_search": true,
+	"search_graph": true, "get_code_snippet": true,
 }
 
 var editTools = map[string]bool{
 	"Edit": true, "MultiEdit": true, "Write": true, "NotebookEdit": true,
+	"edit": true, "write": true, "apply_patch": true,
 }
 
 var runTools = map[string]bool{
 	"Bash": true, "BashOutput": true, "KillShell": true,
+	"bash": true, "exec_command": true, "write_stdin": true,
 }
 
 var planTools = map[string]bool{
 	"TodoWrite": true, "Task": true, "ExitPlanMode": true, "Skill": true,
+	"todowrite": true, "task": true, "agent": true, "spawn_agent": true,
+	"update_plan": true, "skill": true,
 }
 
 // activityOf is the category a request's operation belongs to.
@@ -329,7 +337,7 @@ func activityOf(op string) string {
 //
 // rows arrive chronological, and must: every cache event is defined against the
 // request before it.
-func foldTrace(sid string, rows []store.Row, ts toolset, results []anthropic.ResultItem, captureGone bool,
+func foldTrace(sid string, rows []store.Row, ts toolset, results []wire.ResultItem, captureGone bool,
 	rates []billing.Rate, now time.Time) traceView {
 
 	t := traceView{
@@ -493,11 +501,11 @@ func foldTrace(sid string, rows []store.Row, ts toolset, results []anthropic.Res
 		case evBreak:
 			e.Cause = causeMsg
 			switch {
-			case i > 0 && time.Duration(e.GapMs)*time.Millisecond > billing.CacheTTL:
+			case i > 0 && time.Duration(e.GapMs)*time.Millisecond > billing.CacheTTLFor(t.Model):
 				// Nothing changed. The prefix just went cold.
 				e.Cause = causeGap
 			case i > 0:
-				e.BadIdx = anthropic.FirstDiff(prefixOf(rows[i-1]), prefixOf(r))
+				e.BadIdx = wire.FirstDiff(prefixOf(rows[i-1]), prefixOf(r))
 				switch e.BadIdx {
 				case 0:
 					e.Cause = causeTools

@@ -144,6 +144,32 @@ func TestRecordFilter(t *testing.T) {
 		}
 	})
 
+	for _, path := range []string{"/responses", "/v1/responses"} {
+		t.Run("OpenAI "+path+" is recorded", func(t *testing.T) {
+			resp, err := http.Post(front.URL+path, "application/json", strings.NewReader(`{"model":"gpt-5.6"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+
+			ex := sink.take(t)
+			if ex.Method != "POST" || ex.Path != path {
+				t.Errorf("got %s %s", ex.Method, ex.Path)
+			}
+		})
+	}
+
+	t.Run("Responses auxiliary endpoints are proxied but never recorded", func(t *testing.T) {
+		resp, err := http.Post(front.URL+"/responses/compact", "application/json", strings.NewReader(`{}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		sink.none(t)
+	})
+
 	t.Run("count_tokens is proxied but never recorded", func(t *testing.T) {
 		resp, err := http.Post(front.URL+"/v1/messages/count_tokens", "application/json", strings.NewReader(`{}`))
 		if err != nil {

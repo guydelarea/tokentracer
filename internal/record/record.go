@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/guydelarea/tokentracer/internal/anthropic"
 	"github.com/guydelarea/tokentracer/internal/redact"
 	"github.com/guydelarea/tokentracer/internal/store"
+	"github.com/guydelarea/tokentracer/internal/wire"
 )
 
 // Exchange is one complete round-trip through the proxy: the raw material of a
@@ -47,9 +47,12 @@ const queueSize = 256
 // transient lock to clear, short enough not to wedge the worker.
 const retryDelay = 100 * time.Millisecond
 
-// parseRequest is an internal seam. Tests swap it to inject a panic; nothing
-// else may touch it.
-var parseRequest = anthropic.ParseRequest
+// These are internal seams. Tests swap one to inject a parser panic; nothing
+// else may touch them.
+var (
+	observeRequest  = wire.ObserveRequest
+	observeResponse = wire.ObserveResponse
+)
 
 // Recorder turns Exchanges into rows. One worker goroutine does all the parsing
 // and all the writing, which also serializes SQLite for free.
@@ -180,19 +183,14 @@ func buildRequest(row *store.Row, ex Exchange, best *int, li *linkInfo) {
 		}
 	}()
 
-	// Vertex names the model in the URL, not the body — so the path fills the
-	// column first, and a model the body did name overwrites it below.
-	row.ModelReq = anthropic.VertexModel(ex.Path)
-
-	facts, err := parseRequest(ex.ReqBody)
-	if err != nil {
-		setErr(row, rungParse, "parse", "request: "+err.Error(), best)
+	obs := observeRequest(ex.Path, ex.ReqBody)
+	if obs.RequestErr != nil {
+		setErr(row, rungParse, "parse", "request: "+obs.RequestErr.Error(), best)
 		return
 	}
+	facts := obs.Request
 
-	if facts.Model != "" {
-		row.ModelReq = facts.Model
-	}
+	row.ModelReq = facts.Model
 	row.SessionID = facts.SessionID
 	// The client names its own parent. A session that claims itself is dropped:
 	// self-parenthood would fold a session into its own row and double its spend.
@@ -211,7 +209,7 @@ func buildRequest(row *store.Row, ex Exchange, best *int, li *linkInfo) {
 	// The cache prefix chain, hashed while the body is in hand. It has to be now:
 	// it is a fact about the bytes that were sent, and the capture they were sent
 	// as can be deleted out from under the diagnosis that needs them.
-	if h := anthropic.PrefixHashes(ex.ReqBody); len(h) > 0 {
+	if h := facts.Prefix; len(h) > 0 {
 		if b, err := json.Marshal(h); err == nil {
 			row.Prefix = string(b)
 		}
@@ -236,47 +234,41 @@ func buildResponse(row *store.Row, ex Exchange, best *int, li *linkInfo) (respJS
 		}
 	}()
 
-	if ex.Status >= 400 {
-		typ, msg := anthropic.DecodeError(ex.Status, ex.RespBody)
-		setErr(row, rungUpstream, typ, "response: "+msg, best)
-		return respJSON // keep the error body verbatim
-	}
-
-	var resp anthropic.Response
-	var err error
-	if ex.Streamed {
-		resp, err = anthropic.DecodeSSE(ex.RespBody)
-	} else {
-		resp, err = anthropic.DecodeJSON(ex.RespBody)
-	}
-	if err != nil {
-		setErr(row, rungParse, "parse", "response: "+err.Error(), best)
+	obs := observeResponse(ex.Path, ex.Status, row.Streamed, ex.RespBody)
+	if obs.ResponseErr != nil {
+		setErr(row, rungParse, "parse", "response: "+obs.ResponseErr.Error(), best)
 		return respJSON
 	}
+	if ex.Status >= 400 {
+		if obs.Problem != nil {
+			setErr(row, rungUpstream, obs.Problem.Type, "response: "+obs.Problem.Message, best)
+		}
+		return respJSON // keep the error body verbatim
+	}
+	facts := obs.Response
 
-	row.ModelServed = resp.Model
-	row.StopReason = resp.StopReason
-	row.Op = resp.Op()
-	li.spawned = anthropic.AgentPrompts(resp.Content)
-	row.InputTokens = ptr(resp.Usage.In)
-	row.OutputTokens = ptr(resp.Usage.Out)
-	row.CacheReadTokens = ptr(resp.Usage.CacheRead)
-	row.CacheW5mTokens = ptr(resp.Usage.W5m)
-	row.CacheW1hTokens = ptr(resp.Usage.W1h)
-	row.ThinkTokens, row.TextTokens, row.ToolTokens = anthropic.SplitOutput(resp.Usage.Out, resp.Content)
+	row.ModelServed = facts.Model
+	row.StopReason = facts.StopReason
+	row.Op = facts.Op
+	li.spawned = facts.Spawned
+	row.InputTokens = ptr(facts.Input)
+	row.OutputTokens = ptr(facts.Output)
+	row.CacheReadTokens = ptr(facts.CacheRead)
+	row.CacheW5mTokens = ptr(facts.CacheW5m)
+	row.CacheW1hTokens = ptr(facts.CacheW1h)
+	row.ThinkTokens, row.TextTokens, row.ToolTokens = facts.Think, facts.Text, facts.Tool
 
 	// A 200 whose stream carried an error event is still the upstream saying no.
-	if resp.ErrType != "" {
-		setErr(row, rungUpstream, resp.ErrType, "response: "+resp.ErrMsg, best)
+	if obs.Problem != nil {
+		setErr(row, rungUpstream, obs.Problem.Type, "response: "+obs.Problem.Message, best)
 	}
 
-	// Store the assembled message, not the raw SSE: it is ~3× smaller and it is
+	// Store the assembled response, not the raw SSE: it is ~3× smaller and it is
 	// the only thing that can answer a question we haven't thought of yet.
-	assembled, err := json.Marshal(resp)
-	if err != nil {
-		return ex.RespBody
+	if len(obs.ResponseCapture) > 0 {
+		return obs.ResponseCapture
 	}
-	return assembled
+	return ex.RespBody
 }
 
 func (r *Recorder) insert(row store.Row, reqBody, respJSON []byte) {

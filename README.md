@@ -57,10 +57,16 @@ On first run it asks one question — which client you use — and saves the ans
 tokentracer: first-run setup — which client?
   1) Claude Code — Anthropic API (default)
   2) Claude Code — Vertex AI
-  3) Other — paste an upstream base URL
+  3) Codex / OpenCode — ChatGPT login
+  4) Codex / OpenCode — OpenAI API key
+  5) Other — paste an upstream base URL
 ```
 
 Pick 2 for **Vertex AI** and it asks for your region (blank = global), pointing the proxy at the right Google endpoint. Auth (your `gcloud` ADC token) passes through untouched. Re-run the wizard anytime with `go run ./cmd/tokentracer setup`; a set `UPSTREAM` env var always outranks the saved answer, and non-interactive runs (pipes, CI) skip the wizard and use the defaults.
+
+Pick 3 for the existing ChatGPT OAuth login used by Codex or OpenCode, or 4
+when the client authenticates with an OpenAI API key. TokenTracer never reads or
+stores that credential; the client's `Authorization` header passes through.
 
 Then it listens on `:8787` and forwards upstream, writing `./tokentracer.db`. In another terminal, launch your client through the proxy — the startup log prints the exact line for your backend:
 
@@ -70,9 +76,53 @@ ANTHROPIC_BASE_URL=http://localhost:8787 claude
 
 # Vertex AI
 CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=http://localhost:8787 claude
+
+# Codex (ChatGPT login or OpenAI API)
+codex -c 'openai_base_url="http://localhost:8787"'
+
+# OpenCode (ChatGPT login or OpenAI API)
+OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode
 ```
 
+For another OpenCode provider, select *Other* in setup and enter that
+provider's real base URL. Then override the same provider's `baseURL` with the
+local proxy, for example `{"provider":{"openrouter":{"options":{"baseURL":"http://localhost:8787"}}}}`.
+TokenTracer preserves the request path and headers, so the provider still
+receives its own authentication and wire format.
+
 Open [localhost:8787/dashboard](http://localhost:8787/dashboard) and work as usual. Rows land within two seconds.
+
+### Verify OpenCode
+
+This sends one real prompt through your OpenAI or ChatGPT account, so use a
+small model if you prefer. It does not save an OpenCode configuration or read
+your credentials.
+
+1. Start TokenTracer and select either *Codex / OpenCode — ChatGPT login* or
+   *Codex / OpenCode — OpenAI API key* in the setup wizard:
+
+   ```bash
+   go run ./cmd/tokentracer setup
+   go run ./cmd/tokentracer
+   ```
+
+2. In another terminal, list the OpenAI models available to your OpenCode
+   account and substitute one for `<model>` below:
+
+   ```bash
+   opencode models openai
+   OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"http://localhost:8787"}}}}' \
+     opencode run --model openai/<model> 'Reply with exactly: TokenTracer works'
+   ```
+
+3. Open [localhost:8787/dashboard](http://localhost:8787/dashboard). Within
+   two seconds, it should show one OpenAI session containing the test prompt,
+   its token usage, and its API-equivalent cost. Click the session to inspect
+   the request and assembled response.
+
+If no session appears, make sure the selected OpenCode model begins with
+`openai/`, keep TokenTracer running while you invoke OpenCode, and confirm the
+setup wizard selected the same authentication method that OpenCode uses.
 
 Build a static binary:
 
@@ -95,7 +145,7 @@ forward navigation.
 
 **Do next** is the point of the whole thing. Each card is a fact with a price on it, ranked by what it costs, and each one is computed in Go where a test can hold it to account. On a real Claude Code session: *119 schemas ride on every request and were never invoked* — 53.7k tokens, resent every turn. Your prompt is not what costs you money.
 
-Cache breaks are priced the only honest way: at what the request cost **above what a cache hit would have cost**. An idle gap past the 5-minute TTL re-writes the entire prefix even though not one byte changed — on the session in the screenshot, that alone re-billed $0.92 of a $1.18 bill.
+Cache breaks are priced the only honest way: at what the request cost **above what a cache hit would have cost**. For Anthropic, an idle gap past the 5-minute TTL re-writes the entire prefix even though not one byte changed — on the session in the screenshot, that alone re-billed $0.92 of a $1.18 bill. GPT-5.6 uses OpenAI's [default 30-minute minimum cache lifetime](https://developers.openai.com/api/reference/resources/responses/methods/create), so its gap diagnosis uses that boundary instead.
 
 Every number is folded server-side in Go. The page only words and draws them — including the advice.
 
@@ -105,25 +155,28 @@ A model with no entry in the rate table is reported as **unpriced** — a badge 
 
 The bill follows the model that **served** the request, not the one that was asked for. Those differ more often than you would think, and the difference is money.
 
-Rates live in `internal/billing/rates.go`, generated from [LiteLLM's price registry](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json). Cache reads bill at 0.1x input, cache writes at 1.25x (5-minute) or 2x (1-hour), and requests above 200K input tokens price on Anthropic's long-context tier — which Claude Code sessions live near, so ignoring it would skew exactly the expensive requests.
+Rates live in `internal/billing/rates.go`, seeded from [LiteLLM's price registry](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) and updated from the vendors' published model pages. GPT-5.6 Sol, Terra and Luna use [OpenAI's published standard and long-context rates](https://developers.openai.com/api/docs/pricing#text-tokens). Cache reads bill at 0.1x input and cache writes at 1.25x; Anthropic 1-hour writes bill at 2x.
 
 > [!NOTE]
-> If you are on a Claude subscription you are **not** paying per token. Read the number as *"what this usage would have cost on the API"* — the right number for comparing requests, models and habits against each other, and not your bill.
+> If you are on a Claude or ChatGPT subscription you are **not** paying per token. Read the number as *"what this usage would have cost on the API"* — the right number for comparing requests, models and habits against each other, and not your bill.
 
 ### Supported clients
 
-v1 records the **Anthropic Messages API** (`POST /v1/messages`, streaming and not) — that is Claude Code — and the same calls in their **Vertex AI** spelling (`.../publishers/anthropic/models/<model>:streamRawPredict` and `:rawPredict`, where the model rides in the URL). Any client that speaks either and can override its base URL works; existing authentication headers pass through unchanged.
+TokenTracer records the **Anthropic Messages API** (`POST /v1/messages`, streaming and not), the **OpenAI Responses API** (`POST /responses` or `/v1/responses`), and **OpenAI-compatible Chat Completions** (`POST .../chat/completions`). It also understands Anthropic's **Vertex AI** spelling (`.../publishers/anthropic/models/<model>:streamRawPredict` and `:rawPredict`, where the model rides in the URL). Existing authentication headers pass through unchanged.
 
 | Client | Status | Connection |
 | --- | --- | --- |
 | [Claude Code](https://claude.com/claude-code) | Tested | `ANTHROPIC_BASE_URL=http://localhost:8787` |
 | Claude Code via Vertex AI | Should work | Pick *Vertex AI* in the setup wizard, then `CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=http://localhost:8787` |
 | Anthropic Messages API client | Should work | Set its base URL to `http://localhost:8787` |
-| [OpenCode](https://opencode.ai), [Codex](https://developers.openai.com/codex), [Cursor](https://cursor.com) | Not yet | See the [roadmap](#roadmap) |
+| [Codex](https://developers.openai.com/codex) | Tested | Pick *ChatGPT login* or *OpenAI API key*, then `codex -c 'openai_base_url="http://localhost:8787"'` |
+| [OpenCode](https://opencode.ai) | Tested with ChatGPT login; OpenAI-compatible providers supported | Pick *ChatGPT login* or *OpenAI API key*, then override OpenAI's [`baseURL`](https://opencode.ai/docs/providers) with `OPENCODE_CONFIG_CONTENT`. For a compatible non-OpenAI provider, point its own `baseURL` at the proxy after selecting *Other* in setup. |
+| OpenAI Responses or Chat Completions client | Should work | Set its base URL to `http://localhost:8787` |
+| Vendor-native OpenCode transports | Not yet | Direct Gemini, Bedrock, and other non-Anthropic/non-OpenAI wire protocols are proxied unchanged but not recorded. |
 
-Everything else on any other path is proxied through untouched and never recorded, including `count_tokens` (on Vertex: the `count-tokens` pseudo-model).
+Everything else on any other path is proxied through untouched and never recorded, including Anthropic `count_tokens`, Vertex's `count-tokens` pseudo-model, and Responses auxiliary endpoints such as `/responses/compact`.
 
-Sessions are grouped by Claude Code's `session_id`, which it buries inside the `metadata.user_id` string. A client that sends none is recorded fine and groups under `unknown`.
+Anthropic sessions are grouped by Claude Code's embedded `session_id`; Responses sessions use `prompt_cache_key` (the value Codex and OpenCode send). Chat Completions uses a request session key from `client_metadata`, `metadata`, or `user` when the client supplies one. Auxiliary model calls with no session key are still visible under `(no session id)`.
 
 ### What it records
 
@@ -138,9 +191,9 @@ sqlite3 tokentracer.db 'select model_req, session_id, tool_count, input_tokens, 
 
 Things worth knowing:
 
-- **An aborted generation is still recorded.** Hit esc in Claude Code and Anthropic still bills what it generated — so the proxy detaches from the departed client, drains the upstream stream to the end, and records the real usage with `aborted=1`. That spend is invisible to every JSONL-reading tool.
+- **An aborted generation is still recorded.** Hit esc in a client and the upstream may still bill what it generated — so the proxy detaches from the departed client, drains the upstream stream to the end, and records the real usage with `aborted=1`. That spend is invisible to every JSONL-reading tool.
 - **Nothing recorded is lost.** A body the parser cannot read still lands as a row that says why, keeping the facts that needed no parser and the capture that reproduces the failure. Ctrl-C flushes the queue before the database closes.
-- **The response blob is the whole assembled message** — thinking text and signature, tool inputs as real JSON, usage, the model that actually served it. Its predecessor stored a lossy summary and could never answer a question it had not already thought of.
+- **The response blob is the whole assembled response** — Anthropic message or OpenAI Responses object, including thinking/reasoning, tool inputs, usage, and the model that actually served it. Its predecessor stored a lossy summary and could never answer a question it had not already thought of.
 
 ### Logs and security
 
@@ -199,7 +252,7 @@ Environment variables, or `KEY=value` lines in `./.env` (written by the first-ru
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PORT` | `8787` | Local listen port (proxy, dashboard and API share it) |
-| `UPSTREAM` | `https://api.anthropic.com` | Upstream base URL (`https://<region>-aiplatform.googleapis.com/v1` for Vertex) |
+| `UPSTREAM` | `https://api.anthropic.com` | Upstream base URL (`https://chatgpt.com/backend-api/codex` for ChatGPT auth, `https://api.openai.com/v1` for the OpenAI API, or `https://<region>-aiplatform.googleapis.com/v1` for Vertex) |
 | `TOKENTRACER_DB` | `./tokentracer.db` | SQLite path, created on first run |
 
 ### Development
@@ -220,19 +273,20 @@ cmd/tokentracer     wiring, config, shutdown order
 internal/proxy      the client path: forward, stream, stamp, hand over. Zero parsing.
 internal/record     the Recorder: never loses an exchange it saw
 internal/anthropic  vendor module: parse, break down, decode SSE. Pure functions.
+internal/openai     OpenAI Responses module. Pure functions.
+internal/wire       normalized seam used by the Recorder and dashboard
 internal/billing    read-time pricing, generated rate table
 internal/store      SQLite: schema, one-transaction writes, three read queries
 internal/api        the fold — every number the dashboard shows — plus the routes
 web/                the dashboard, embedded with go:embed
 ```
 
-One vendor per package, one file per vendor. A second one (`internal/openai/`) follows that shape.
+One wire dialect per package; the rest of the application only sees normalized vendor facts.
 
 ### Contributing
 
 Issues and pull requests are welcome. The most valuable contributions are:
 
-- OpenAI Chat Completions and Responses parsing, for Codex, Cursor and OpenCode.
 - Credential shapes the redactor does not know yet (`internal/redact`), with a test case each.
 - Updates to the rate table as models and pricing change.
 
@@ -250,7 +304,8 @@ Keep changes focused. Add a real test for non-trivial behavior — and prefer on
 - [x] **Improve**: ranked money-leak recommendations — unused tool schemas, exploration re-reads, cache breaks, compaction candidates
 - [x] Request-body secret redaction
 - [x] Capture auto-pruning
-- [ ] OpenAI-compatible request parsing (Codex, Cursor, OpenCode)
+- [x] OpenAI Responses parsing (Codex and OpenCode)
+- [x] OpenAI Chat Completions parsing (OpenCode-compatible providers and other compatible clients)
 
 ### License
 
