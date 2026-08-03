@@ -432,6 +432,48 @@ func TestTTFTStampedAtFirstBodyByte(t *testing.T) {
 	}
 }
 
+// Pi's openai-codex provider sends /codex/responses, while Codex CLI sends
+// /responses. The setup wizard uses an upstream ending in /codex so both clients
+// need to arrive upstream as /backend-api/codex/responses, not the doubled
+// /backend-api/codex/codex/responses that ChatGPT answers with {"detail":"Not Found"}.
+func TestCodexBasePathIsNotDuplicatedForPi(t *testing.T) {
+	got := make(chan string, 2)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.URL.EscapedPath()
+		io.WriteString(w, `{"ok":true}`)
+	}))
+	t.Cleanup(up.Close)
+
+	sink := newFakeSink()
+	p, err := New(up.URL+"/backend-api/codex", sink)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	front := httptest.NewServer(p)
+	t.Cleanup(front.Close)
+
+	for _, path := range []string{"/responses", "/codex/responses"} {
+		resp, err := http.Post(front.URL+path, "application/json", strings.NewReader(`{"model":"gpt-5.5","input":"hi"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		sink.take(t)
+	}
+
+	for i := 0; i < 2; i++ {
+		select {
+		case p := <-got:
+			if p != "/backend-api/codex/responses" {
+				t.Errorf("upstream saw path %q, want /backend-api/codex/responses", p)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("upstream never saw the request")
+		}
+	}
+}
+
 // The proxy must hand upstream the path the client sent, byte for byte. On Vertex
 // the model name lives in the URL, and Claude Code spells the 1M-context variant
 // claude-opus-5[1m] — characters Go's url.String() escapes to %5B/%5D unless

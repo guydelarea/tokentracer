@@ -55,18 +55,18 @@ On first run it asks one question — which client you use — and saves the ans
 
 ```text
 tokentracer: first-run setup — which client?
-  1) Claude Code — Anthropic API (default)
+  1) Claude Code / Pi — Anthropic API (default)
   2) Claude Code — Vertex AI
-  3) Codex / OpenCode — ChatGPT login
-  4) Codex / OpenCode — OpenAI API key
+  3) Codex / OpenCode / Pi — ChatGPT login
+  4) Codex / OpenCode / Pi — OpenAI API key
   5) Other — paste an upstream base URL
 ```
 
 Pick 2 for **Vertex AI** and it asks for your region (blank = global), pointing the proxy at the right Google endpoint. Auth (your `gcloud` ADC token) passes through untouched. Re-run the wizard anytime with `go run ./cmd/tokentracer setup`; a set `UPSTREAM` env var always outranks the saved answer, and non-interactive runs (pipes, CI) skip the wizard and use the defaults.
 
-Pick 3 for the existing ChatGPT OAuth login used by Codex or OpenCode, or 4
-when the client authenticates with an OpenAI API key. TokenTracer never reads or
-stores that credential; the client's `Authorization` header passes through.
+Pick 3 for the existing ChatGPT OAuth login used by Codex, OpenCode, or Pi, or
+4 when the client authenticates with an OpenAI API key. TokenTracer never reads
+or stores that credential; the client's `Authorization` header passes through.
 
 Then it listens on `:8787` and forwards upstream, writing `./tokentracer.db`. In another terminal, launch your client through the proxy — the startup log prints the exact line for your backend:
 
@@ -82,6 +82,14 @@ codex -c 'openai_base_url="http://localhost:8787"'
 
 # OpenCode (ChatGPT login or OpenAI API)
 OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode
+
+# Pi (ChatGPT login, OpenAI API, or Anthropic API)
+# Add the matching provider override to ~/.pi/agent/models.json, then run pi.
+# Examples:
+#   {"providers":{"openai-codex":{"baseUrl":"http://localhost:8787"}}}
+#   {"providers":{"openai":{"baseUrl":"http://localhost:8787"}}}
+#   {"providers":{"anthropic":{"baseUrl":"http://localhost:8787"}}}
+pi --provider openai-codex
 ```
 
 For another OpenCode provider, select *Other* in setup and enter that
@@ -171,6 +179,7 @@ TokenTracer records the **Anthropic Messages API** (`POST /v1/messages`, streami
 | Anthropic Messages API client | Should work | Set its base URL to `http://localhost:8787` |
 | [Codex](https://developers.openai.com/codex) | Tested (WebSocket and HTTPS) | Pick *ChatGPT login* or *OpenAI API key*, then `codex -c 'openai_base_url="http://localhost:8787"'` |
 | [OpenCode](https://opencode.ai) | Tested with ChatGPT login; OpenAI-compatible providers supported | Pick *ChatGPT login* or *OpenAI API key*, then override OpenAI's [`baseURL`](https://opencode.ai/docs/providers) with `OPENCODE_CONFIG_CONTENT`. For a compatible non-OpenAI provider, point its own `baseURL` at the proxy after selecting *Other* in setup. |
+| [Pi](https://pi.dev) | Supported for Anthropic, ChatGPT login, OpenAI Responses, and OpenAI-compatible Chat Completions providers | Pick the matching setup option, then set `providers.<provider>.baseUrl` in `~/.pi/agent/models.json` to `http://localhost:8787` and run `pi --provider <provider>`. |
 | OpenAI Responses or Chat Completions client | Should work | Set its base URL to `http://localhost:8787` |
 | Vendor-native OpenCode transports | Not yet | Direct Gemini, Bedrock, and other non-Anthropic/non-OpenAI wire protocols are proxied unchanged but not recorded. |
 
@@ -181,7 +190,7 @@ Codex's persistent Responses WebSocket is proxied bidirectionally. Each
 terminal response event arrives, so a long-lived socket still produces the same
 dashboard facts and captures as the HTTPS transport.
 
-Anthropic sessions are grouped by Claude Code's embedded `session_id`; Responses sessions use `prompt_cache_key` (the value Codex and OpenCode send). Chat Completions uses a request session key from `client_metadata`, `metadata`, or `user` when the client supplies one. Auxiliary model calls with no session key are still visible under `(no session id)`.
+Anthropic sessions are grouped by Claude Code's embedded `session_id`; Responses sessions use `prompt_cache_key` when clients send one. Chat Completions uses a request session key from `client_metadata`, `metadata`, or `user` when the client supplies one. Auxiliary model calls with no session key are still visible under `(no session id)`.
 
 ### What it records
 
@@ -309,8 +318,8 @@ Keep changes focused. Add a real test for non-trivial behavior — and prefer on
 - [x] **Improve**: ranked money-leak recommendations — unused tool schemas, exploration re-reads, cache breaks, compaction candidates
 - [x] Request-body secret redaction
 - [x] Capture auto-pruning
-- [x] OpenAI Responses parsing (Codex and OpenCode)
-- [x] OpenAI Chat Completions parsing (OpenCode-compatible providers and other compatible clients)
+- [x] OpenAI Responses parsing (Codex, OpenCode, Pi)
+- [x] OpenAI Chat Completions parsing (OpenCode/Pi-compatible providers and other compatible clients)
 
 ### License
 

@@ -58,11 +58,11 @@ func New(upstream string, sink record.Sink) (*Proxy, error) {
 	p := &Proxy{upstream: u, client: &http.Client{Transport: tr}, sockets: sockets, sink: sink}
 	p.upgrade = &httputil.ReverseProxy{
 		Director: func(r *http.Request) {
-			path, rawPath := r.URL.Path, r.URL.EscapedPath()
+			path, rawPath := p.upstreamPaths(r)
 			r.URL.Scheme = u.Scheme
 			r.URL.Host = u.Host
-			r.URL.Path = strings.TrimSuffix(u.Path, "/") + path
-			r.URL.RawPath = strings.TrimSuffix(u.EscapedPath(), "/") + rawPath
+			r.URL.Path = path
+			r.URL.RawPath = rawPath
 			r.Host = u.Host
 			// Keeping frames uncompressed lets the recorder inspect their JSON
 			// without changing what Codex or the Responses API sends.
@@ -217,10 +217,33 @@ func recordable(r *http.Request) bool {
 // with Path anyway, so the ordinary /v1/messages case is unaffected.
 func (p *Proxy) target(r *http.Request) string {
 	u := *p.upstream
-	u.Path = strings.TrimSuffix(p.upstream.Path, "/") + r.URL.Path
-	u.RawPath = strings.TrimSuffix(p.upstream.EscapedPath(), "/") + r.URL.EscapedPath()
+	u.Path, u.RawPath = p.upstreamPaths(r)
 	u.RawQuery = r.URL.RawQuery
 	return u.String()
+}
+
+func (p *Proxy) upstreamPaths(r *http.Request) (path, rawPath string) {
+	return appendUpstreamPath(p.upstream.Path, r.URL.Path),
+		appendUpstreamPath(p.upstream.EscapedPath(), r.URL.EscapedPath())
+}
+
+func appendUpstreamPath(basePath, requestPath string) string {
+	basePath = strings.TrimSuffix(basePath, "/")
+	requestPath = dedupeCodexPath(basePath, requestPath)
+	return basePath + requestPath
+}
+
+func dedupeCodexPath(basePath, requestPath string) string {
+	if !strings.HasSuffix(basePath, "/codex") {
+		return requestPath
+	}
+	if requestPath == "/codex" {
+		return ""
+	}
+	if rest, ok := strings.CutPrefix(requestPath, "/codex/"); ok {
+		return "/" + rest
+	}
+	return requestPath
 }
 
 // teeBuffer keeps the head of the stream and remembers that it gave up.
