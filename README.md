@@ -169,12 +169,17 @@ TokenTracer records the **Anthropic Messages API** (`POST /v1/messages`, streami
 | [Claude Code](https://claude.com/claude-code) | Tested | `ANTHROPIC_BASE_URL=http://localhost:8787` |
 | Claude Code via Vertex AI | Should work | Pick *Vertex AI* in the setup wizard, then `CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=http://localhost:8787` |
 | Anthropic Messages API client | Should work | Set its base URL to `http://localhost:8787` |
-| [Codex](https://developers.openai.com/codex) | Tested | Pick *ChatGPT login* or *OpenAI API key*, then `codex -c 'openai_base_url="http://localhost:8787"'` |
+| [Codex](https://developers.openai.com/codex) | Tested (WebSocket and HTTPS) | Pick *ChatGPT login* or *OpenAI API key*, then `codex -c 'openai_base_url="http://localhost:8787"'` |
 | [OpenCode](https://opencode.ai) | Tested with ChatGPT login; OpenAI-compatible providers supported | Pick *ChatGPT login* or *OpenAI API key*, then override OpenAI's [`baseURL`](https://opencode.ai/docs/providers) with `OPENCODE_CONFIG_CONTENT`. For a compatible non-OpenAI provider, point its own `baseURL` at the proxy after selecting *Other* in setup. |
 | OpenAI Responses or Chat Completions client | Should work | Set its base URL to `http://localhost:8787` |
 | Vendor-native OpenCode transports | Not yet | Direct Gemini, Bedrock, and other non-Anthropic/non-OpenAI wire protocols are proxied unchanged but not recorded. |
 
 Everything else on any other path is proxied through untouched and never recorded, including Anthropic `count_tokens`, Vertex's `count-tokens` pseudo-model, and Responses auxiliary endpoints such as `/responses/compact`.
+
+Codex's persistent Responses WebSocket is proxied bidirectionally. Each
+`response.create` message is recorded as its own Exchange when the matching
+terminal response event arrives, so a long-lived socket still produces the same
+dashboard facts and captures as the HTTPS transport.
 
 Anthropic sessions are grouped by Claude Code's embedded `session_id`; Responses sessions use `prompt_cache_key` (the value Codex and OpenCode send). Chat Completions uses a request session key from `client_metadata`, `metadata`, or `user` when the client supplies one. Auxiliary model calls with no session key are still visible under `(no session id)`.
 
