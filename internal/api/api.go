@@ -160,8 +160,8 @@ func (s *server) trace(w http.ResponseWriter, r *http.Request) {
 	// rows survives that.
 	set, gone := s.toolsOf(sid, rows[len(rows)-1])
 	var results []wire.ResultItem
-	if body, err := s.latestBody(rows); err == nil {
-		if inspection, inspectErr := wire.InspectRequest(body); inspectErr == nil {
+	if inspection, err := s.latestInspection(rows); err == nil {
+		if inspection.Kind != wire.Unknown {
 			results = inspection.Results
 		}
 	} else {
@@ -221,7 +221,7 @@ func (s *server) childPrompts(rows []store.Row, agents []agentRow) map[string][]
 		if err != nil {
 			continue
 		}
-		inspection, err := wire.InspectRequest(body)
+		inspection, err := wire.InspectRequestAt(endpointPath(r.Endpoint), body)
 		if err == nil && strings.TrimSpace(inspection.Facts.FirstText) != "" {
 			key := strings.TrimSpace(inspection.Facts.FirstText)
 			out[key] = append(out[key], a)
@@ -244,7 +244,7 @@ func (s *server) flowOf(rows []store.Row, children map[string][]agentRow) []flow
 		turn.Captured = true
 		// Row.Label is intentionally the session opener. The graph needs the
 		// newest human text in this request's full conversation instead.
-		if inspection, inspectErr := wire.InspectRequest(req); inspectErr == nil {
+		if inspection, inspectErr := wire.InspectRequestAt(endpointPath(r.Endpoint), req); inspectErr == nil {
 			turn.Ask = inspection.LatestUserText
 			for _, result := range inspection.ToolResults {
 				name := called[result.ToolUseID]
@@ -288,19 +288,19 @@ func linkSubagents(turns []flowTurn, children map[string][]agentRow) {
 	}
 }
 
-// latestBody is the newest captured request body in the session — the context as
-// it stands now, which is the only one the cut list can be computed against.
-func (s *server) latestBody(rows []store.Row) ([]byte, error) {
+// latestInspection reads the newest captured request in a session — the context
+// as it stands now, which is the only one the cut list can be computed against.
+func (s *server) latestInspection(rows []store.Row) (wire.RequestInspection, error) {
 	for i := len(rows) - 1; i >= 0; i-- {
 		body, _, err := s.st.Capture(rows[i].ID)
 		if err == nil && len(body) > 0 {
-			return body, nil
+			return wire.InspectRequestAt(endpointPath(rows[i].Endpoint), body)
 		}
 		if !errors.Is(err, store.ErrNoCapture) {
-			return nil, err
+			return wire.RequestInspection{}, err
 		}
 	}
-	return nil, store.ErrNoCapture
+	return wire.RequestInspection{}, store.ErrNoCapture
 }
 
 // toolsets resolves the schemas for every session in the scan, from cache where
@@ -365,7 +365,11 @@ func (s *server) readTools(sid string) (toolset, error) {
 	if err != nil {
 		return toolset{}, err
 	}
-	inspection, err := wire.InspectRequest(body)
+	endpoint, err := s.st.Endpoint(id)
+	if err != nil {
+		return toolset{}, err
+	}
+	inspection, err := wire.InspectRequestAt(endpointPath(endpoint), body)
 	if err != nil {
 		return toolset{}, err
 	}
@@ -400,8 +404,11 @@ func (s *server) capture(w http.ResponseWriter, r *http.Request) {
 	}
 
 	view := captureView{Request: rawOrNull(reqJSON), Response: rawOrNull(respJSON)}
-	if inspection, err := wire.InspectRequest(reqJSON); err == nil {
-		view.Breakdown = &inspection.Breakdown
+	endpoint, endpointErr := s.st.Endpoint(id)
+	if endpointErr == nil {
+		if inspection, err := wire.InspectRequestAt(endpointPath(endpoint), reqJSON); err == nil {
+			view.Breakdown = &inspection.Breakdown
+		}
 	}
 	// A capture we can't break down still shows its raw bodies: a body we failed
 	// to parse is exactly the one worth looking at.
@@ -410,6 +417,14 @@ func (s *server) capture(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(view); err != nil {
 		log.Printf("tokentracer: encoding capture %d: %v", id, err)
 	}
+}
+
+func endpointPath(endpoint string) string {
+	_, path, ok := strings.Cut(endpoint, " ")
+	if !ok {
+		return ""
+	}
+	return path
 }
 
 // rawOrNull keeps the blob verbatim, and stays valid JSON if it isn't.

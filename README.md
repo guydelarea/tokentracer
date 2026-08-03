@@ -84,6 +84,12 @@ codex -c 'openai_base_url="http://localhost:8787"'
 OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode
 ```
 
+For another OpenCode provider, select *Other* in setup and enter that
+provider's real base URL. Then override the same provider's `baseURL` with the
+local proxy, for example `{"provider":{"openrouter":{"options":{"baseURL":"http://localhost:8787"}}}}`.
+TokenTracer preserves the request path and headers, so the provider still
+receives its own authentication and wire format.
+
 Open [localhost:8787/dashboard](http://localhost:8787/dashboard) and work as usual. Rows land within two seconds.
 
 ### Verify OpenCode
@@ -156,7 +162,7 @@ Rates live in `internal/billing/rates.go`, seeded from [LiteLLM's price registry
 
 ### Supported clients
 
-TokenTracer records the **Anthropic Messages API** (`POST /v1/messages`, streaming and not) and the **OpenAI Responses API** (`POST /responses` or `/v1/responses`). It also understands Anthropic's **Vertex AI** spelling (`.../publishers/anthropic/models/<model>:streamRawPredict` and `:rawPredict`, where the model rides in the URL). Existing authentication headers pass through unchanged.
+TokenTracer records the **Anthropic Messages API** (`POST /v1/messages`, streaming and not), the **OpenAI Responses API** (`POST /responses` or `/v1/responses`), and **OpenAI-compatible Chat Completions** (`POST .../chat/completions`). It also understands Anthropic's **Vertex AI** spelling (`.../publishers/anthropic/models/<model>:streamRawPredict` and `:rawPredict`, where the model rides in the URL). Existing authentication headers pass through unchanged.
 
 | Client | Status | Connection |
 | --- | --- | --- |
@@ -164,13 +170,13 @@ TokenTracer records the **Anthropic Messages API** (`POST /v1/messages`, streami
 | Claude Code via Vertex AI | Should work | Pick *Vertex AI* in the setup wizard, then `CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=http://localhost:8787` |
 | Anthropic Messages API client | Should work | Set its base URL to `http://localhost:8787` |
 | [Codex](https://developers.openai.com/codex) | Tested | Pick *ChatGPT login* or *OpenAI API key*, then `codex -c 'openai_base_url="http://localhost:8787"'` |
-| [OpenCode](https://opencode.ai) | Tested | Pick *ChatGPT login* or *OpenAI API key*, then override OpenAI's [`baseURL`](https://opencode.ai/v2/docs/providers) with `OPENCODE_CONFIG_CONTENT` as shown above |
-| OpenAI Responses API client | Should work | Set its base URL to `http://localhost:8787` |
-| [Cursor](https://cursor.com) and Chat Completions clients | Not yet | Responses is supported; Chat Completions is still on the [roadmap](#roadmap) |
+| [OpenCode](https://opencode.ai) | Tested with ChatGPT login; OpenAI-compatible providers supported | Pick *ChatGPT login* or *OpenAI API key*, then override OpenAI's [`baseURL`](https://opencode.ai/docs/providers) with `OPENCODE_CONFIG_CONTENT`. For a compatible non-OpenAI provider, point its own `baseURL` at the proxy after selecting *Other* in setup. |
+| OpenAI Responses or Chat Completions client | Should work | Set its base URL to `http://localhost:8787` |
+| Vendor-native OpenCode transports | Not yet | Direct Gemini, Bedrock, and other non-Anthropic/non-OpenAI wire protocols are proxied unchanged but not recorded. |
 
 Everything else on any other path is proxied through untouched and never recorded, including Anthropic `count_tokens`, Vertex's `count-tokens` pseudo-model, and Responses auxiliary endpoints such as `/responses/compact`.
 
-Anthropic sessions are grouped by Claude Code's embedded `session_id`; Responses sessions use `prompt_cache_key` (the value Codex and OpenCode send). Auxiliary model calls with no session key are still visible under `(no session id)`.
+Anthropic sessions are grouped by Claude Code's embedded `session_id`; Responses sessions use `prompt_cache_key` (the value Codex and OpenCode send). Chat Completions uses a request session key from `client_metadata`, `metadata`, or `user` when the client supplies one. Auxiliary model calls with no session key are still visible under `(no session id)`.
 
 ### What it records
 
@@ -281,7 +287,6 @@ One wire dialect per package; the rest of the application only sees normalized v
 
 Issues and pull requests are welcome. The most valuable contributions are:
 
-- OpenAI Chat Completions parsing, for clients that do not use Responses.
 - Credential shapes the redactor does not know yet (`internal/redact`), with a test case each.
 - Updates to the rate table as models and pricing change.
 
@@ -300,7 +305,7 @@ Keep changes focused. Add a real test for non-trivial behavior — and prefer on
 - [x] Request-body secret redaction
 - [x] Capture auto-pruning
 - [x] OpenAI Responses parsing (Codex and OpenCode)
-- [ ] OpenAI Chat Completions parsing (Cursor and other compatible clients)
+- [x] OpenAI Chat Completions parsing (OpenCode-compatible providers and other compatible clients)
 
 ### License
 

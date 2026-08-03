@@ -632,8 +632,12 @@ func ResponseCalls(body []byte) []Call {
 }
 
 func AgentPrompts(items []OutputItem) []string {
+	return agentPrompts(Calls(items))
+}
+
+func agentPrompts(calls []Call) []string {
 	var out []string
-	for _, call := range Calls(items) {
+	for _, call := range calls {
 		name := strings.ToLower(call.Name)
 		if name != "task" && name != "agent" && name != "spawn_agent" && !strings.HasSuffix(name, ".spawn_agent") {
 			continue

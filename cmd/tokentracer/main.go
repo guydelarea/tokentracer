@@ -180,7 +180,13 @@ func launchLines(cfg config) []string {
 			fmt.Sprintf(`OpenCode: OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"%s"}}}}' opencode`, base),
 		}
 	}
-	return []string{"Claude Code: ANTHROPIC_BASE_URL=" + base + " claude"}
+	if strings.Contains(cfg.Upstream, "api.anthropic.com") {
+		return []string{
+			"Claude Code: ANTHROPIC_BASE_URL=" + base + " claude",
+			fmt.Sprintf(`OpenCode: OPENCODE_CONFIG_CONTENT='{"provider":{"anthropic":{"options":{"baseURL":"%s"}}}}' opencode`, base),
+		}
+	}
+	return []string{"OpenCode: set the selected provider's options.baseURL to " + base}
 }
 
 // app is the wiring: store → recorder → proxy, plus the dashboard reading the

@@ -271,7 +271,7 @@ func TestRecordVertexExchange(t *testing.T) {
 	}
 }
 
-func TestRecordOpenAIResponsesExchange(t *testing.T) {
+func TestRecordOpenAIResponsesExchangeUsesRequestStreamFlag(t *testing.T) {
 	r, st := newRecorder(t)
 	req := []byte(`{
 	  "model":"gpt-5.6-sol","stream":true,"prompt_cache_key":"codex-thread",
@@ -282,7 +282,7 @@ func TestRecordOpenAIResponsesExchange(t *testing.T) {
 		`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","call_id":"call_1","name":"exec_command","arguments":"{\"cmd\":\"go test ./...\"}"}],"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":60,"cache_write_tokens":20},"output_tokens":30,"output_tokens_details":{"reasoning_tokens":10}}}}` +
 		"\n\n")
 	r.Record(Exchange{
-		Start: time.Now(), Method: "POST", Path: "/responses", Status: 200, Streamed: true,
+		Start: time.Now(), Method: "POST", Path: "/responses", Status: 200,
 		ReqBody: req, RespBody: resp,
 	})
 	rows := rowsOf(t, r, st)
@@ -293,6 +293,9 @@ func TestRecordOpenAIResponsesExchange(t *testing.T) {
 	row := rows[0]
 	if row.ModelReq != "gpt-5.6-sol" || row.ModelServed != "gpt-5.6-sol" || row.SessionID != "codex-thread" {
 		t.Errorf("model/session facts = %+v", row)
+	}
+	if !row.Streamed {
+		t.Error("Streamed = false, want true from the request stream flag")
 	}
 	if deref(row.InputTokens) != 20 || deref(row.CacheReadTokens) != 60 ||
 		deref(row.CacheW5mTokens) != 20 || deref(row.OutputTokens) != 30 {

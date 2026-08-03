@@ -2066,6 +2066,64 @@ function inspText(v) {
   return v == null ? '' : JSON.stringify(v, null, 2);
 }
 
+/* The inspector receives captured vendor bodies, not a normalized request. Keep
+   that distinction at the edge: all supported wire formats become one display
+   shape here, while the raw tab remains the exact original request. */
+/** @param {*} req @returns {{system: string, messages: any[]}} */
+function requestView(req) {
+  var system = [], all = req.messages, messages = [], i, m, value;
+  if (req.system != null) system.push(inspText(req.system));
+  if (req.instructions != null) system.push(inspText(req.instructions));
+  if (!isArr(all)) all = req.input;
+  if (typeof all === 'string') all = [{ role: 'user', content: all }];
+  if (!isArr(all)) all = [];
+  for (i = 0; i < all.length; i++) {
+    m = all[i] || {};
+    if (m.role === 'system' || m.role === 'developer') {
+      value = m.content;
+      system.push(inspText(value == null ? m : value));
+    } else messages.push(m);
+  }
+  return { system: system.filter(Boolean).join('\n\n'), messages: messages };
+}
+
+/** @param {*} value @returns {*} */
+function jsonValue(value) {
+  if (typeof value !== 'string') return value;
+  try { return JSON.parse(value); } catch (_) { return value; }
+}
+
+/** @param {*} resp @returns {any[]} */
+function responseBlocks(resp) {
+  var output = [], source, i, j, item, message, calls;
+  if (isArr(resp.content)) return resp.content;
+  if (isArr(resp.output)) {
+    for (i = 0; i < resp.output.length; i++) {
+      item = resp.output[i] || {};
+      if (item.type === 'message' && isArr(item.content)) {
+        for (j = 0; j < item.content.length; j++) output.push(item.content[j]);
+      } else output.push(item);
+    }
+    return output;
+  }
+  source = resp.choices || [];
+  for (i = 0; i < source.length; i++) {
+    message = source[i] && (source[i].message || source[i].delta) || {};
+    if (message.reasoning_content || message.reasoning) {
+      output.push({ type: 'thinking', thinking: message.reasoning_content || message.reasoning });
+    }
+    if (message.content != null && inspText(message.content)) {
+      output.push({ type: 'text', text: inspText(message.content) });
+    }
+    calls = message.tool_calls || [];
+    for (j = 0; j < calls.length; j++) {
+      item = calls[j] || {};
+      output.push({ type: 'tool_use', name: item.function && item.function.name, input: jsonValue(item.function && item.function.arguments) });
+    }
+  }
+  return output;
+}
+
 /* foldPre renders long text collapsed to its head, with an expander that shows
    how much is hidden. The inspector's bodies are tens of KB — a wall of every
    one of them at once is what made the tabs unreviewable. */
@@ -2084,6 +2142,13 @@ function foldPre(key, txt, cap) {
 /** @param {*} m @param {string} key @returns {string} */
 function msgDetail(m, key) {
   var c = m.content;
+  if (c == null) {
+    if (m.type === 'function_call') return foldPre(key + 'b', JSON.stringify(jsonValue(m.arguments), null, 2), 900);
+    if (m.type === 'function_call_output') return foldPre(key + 'b', inspText(m.output), 900);
+    if (m.type === 'reasoning') return foldPre(key + 'b', inspText(m.summary || m.content), 900);
+    if (isArr(m.tool_calls)) return foldPre(key + 'b', JSON.stringify(m.tool_calls, null, 2), 900);
+    return foldPre(key + 'b', JSON.stringify(m, null, 2), 900);
+  }
   if (typeof c === 'string') return foldPre(key + 'b', c, 900);
   if (!isArr(c)) return foldPre(key + 'b', JSON.stringify(c, null, 2), 900);
   var h = '', i;
@@ -2105,6 +2170,13 @@ function msgDetail(m, key) {
 /** @param {*} m one message of the captured request @returns {string} */
 function msgPreview(m) {
   var c = m.content, i, parts = [];
+  if (c == null) {
+    if (m.type === 'function_call') return 'function_call · ' + (m.name || '');
+    if (m.type === 'function_call_output') return 'function result · ' + fK(JSON.stringify(m.output || '').length);
+    if (m.type === 'reasoning') return 'reasoning';
+    if (isArr(m.tool_calls)) return 'tool calls · ' + m.tool_calls.length;
+    return JSON.stringify(m);
+  }
   if (typeof c === 'string') return c;
   if (Object.prototype.toString.call(c) !== '[object Array]') return JSON.stringify(c);
   for (i = 0; i < c.length; i++) {
@@ -2129,14 +2201,7 @@ function loading() { return '<div class="note" style="padding:16px 0">loading…
 function requestTab(q, j) {
   if (j === null) return loading();
   if (j.missing) return gone(q);
-  var req = j.request || {};
-  var sys = req.system;
-  var all = req.messages || [];
-  var msgs = [], i;
-  for (i = 0; i < all.length; i++) {
-    if (all[i] && all[i].role === 'system') { if (!sys) sys = all[i].content; }
-    else msgs.push(all[i]);
-  }
+  var view = requestView(j.request || {}), sys = view.system, msgs = view.messages, i;
   var h = '<div class="hdrline" style="margin-top:24px"><div class="cap">System prompt</div>' +
     '<div class="note">' + fK(q.bytes.system) + '</div></div>' +
     (sys ? foldPre('sys', inspText(sys), 500) : '<div class="note" style="padding:12px 0">no system prompt</div>');
@@ -2164,7 +2229,7 @@ function requestTab(q, j) {
 function responseTab(q, j) {
   if (j === null) return loading();
   if (j.missing) return gone(q);
-  var resp = j.response || {}, bl = resp.content || [];
+  var resp = j.response || {}, bl = responseBlocks(resp);
   var sh = q.shape || { think: 0, text: 0, tool: 0 };
   var h = '<div class="hdrline" style="margin-top:24px"><div class="cap">Decoded response</div>' +
     '<div class="note">' + bl.length + (bl.length === 1 ? ' block' : ' blocks') + ' · ' + fT(q.tok.out || 0) + ' out · ' +
@@ -2176,9 +2241,10 @@ function responseTab(q, j) {
   for (var i = 0; i < bl.length; i++) {
     var b = bl[i] || {};
     var head = b.type || 'block', body = '', color = '#8a8a8a';
-    if (b.type === 'tool_use') { head = 'tool_use · ' + (b.name || ''); body = JSON.stringify(b.input || {}, null, 2); color = MIN; }
+    if (b.type === 'tool_use' || b.type === 'function_call') { head = 'tool_use · ' + (b.name || ''); body = JSON.stringify(jsonValue(b.input || b.arguments || {}), null, 2); color = MIN; }
     else if (b.type === 'thinking') { body = b.thinking || ''; color = MTH; }
-    else if (b.type === 'text') { body = b.text || ''; color = '#d6d6d6'; }
+    else if (b.type === 'text' || b.type === 'output_text' || b.type === 'input_text') { body = b.text || ''; color = '#d6d6d6'; }
+    else if (b.type === 'reasoning') { body = inspText(b.summary || b.content); color = MTH; }
     else { body = JSON.stringify(b, null, 2); }
     h += '<div class="blk"><div class="bh"><span style="color:' + color + '">' + esc(head) + '</span>' +
       '<span class="m">' + fK((body || '').length) + '</span></div>' + foldPre('r' + i, body, 900) + '</div>';

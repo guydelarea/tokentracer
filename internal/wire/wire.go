@@ -17,9 +17,10 @@ import (
 type Kind string
 
 const (
-	Unknown   Kind = ""
-	Anthropic Kind = "anthropic"
-	OpenAI    Kind = "openai"
+	Unknown    Kind = ""
+	Anthropic  Kind = "anthropic"
+	OpenAI     Kind = "openai"
+	OpenAIChat Kind = "openai_chat"
 )
 
 type Observation struct {
@@ -90,6 +91,12 @@ func KindForPath(path string) Kind {
 	if model := anthropic.VertexModel(path); model != "" && model != "count-tokens" {
 		return Anthropic
 	}
+	// OpenCode uses this protocol for the broad set of providers backed by the
+	// AI SDK's openai-compatible adapter. Match the suffix so Azure deployment
+	// paths and provider-specific prefixes work too.
+	if strings.HasSuffix(strings.TrimSuffix(path, "/"), "/chat/completions") {
+		return OpenAIChat
+	}
 	// A caller's configured base URL decides whether this arrives as
 	// /responses, /v1/responses, or /backend-api/codex/responses.
 	if strings.HasSuffix(strings.TrimSuffix(path, "/"), "/responses") {
@@ -133,6 +140,19 @@ func ObserveRequest(path string, body []byte) Observation {
 			TotalBytes: facts.TotalBytes, ToolsBytes: facts.ToolsBytes, SystemBytes: facts.SystemBytes,
 			MessagesBytes: facts.MessagesBytes, Label: facts.Label, FirstText: facts.FirstText,
 			Prefix: openai.PrefixHashes(body),
+		}
+	case OpenAIChat:
+		facts, err := openai.ParseChatRequest(body)
+		if err != nil {
+			obs.RequestErr = err
+			break
+		}
+		obs.Request = RequestFacts{
+			Model: facts.Model, SessionID: facts.SessionID, ParentSessionID: facts.ParentSessionID,
+			Stream: facts.Stream, Turns: facts.Turns, ToolCount: facts.ToolCount, MaxTokens: facts.MaxTokens,
+			TotalBytes: facts.TotalBytes, ToolsBytes: facts.ToolsBytes, SystemBytes: facts.SystemBytes,
+			MessagesBytes: facts.MessagesBytes, Label: facts.Label, FirstText: facts.FirstText,
+			Prefix: openai.ChatPrefixHashes(body),
 		}
 	default:
 		obs.RequestErr = errors.New("unknown vendor path")
@@ -203,6 +223,32 @@ func ObserveResponse(path string, status int, streamed bool, body []byte) Observ
 		if responseFacts.ErrType != "" {
 			obs.Problem = &Problem{Type: responseFacts.ErrType, Message: responseFacts.ErrMsg}
 		}
+	case OpenAIChat:
+		if status >= 400 {
+			typ, message := openai.DecodeError(status, body)
+			obs.Problem = &Problem{Type: typ, Message: message}
+			break
+		}
+		var responseFacts openai.ChatResponseFacts
+		var err error
+		if streamed {
+			_, responseFacts, obs.ResponseCapture, err = openai.DecodeChatSSE(body)
+		} else {
+			_, responseFacts, err = openai.DecodeChatJSON(body)
+		}
+		if err != nil {
+			obs.ResponseErr = err
+			break
+		}
+		obs.Response = ResponseFacts{
+			Model: responseFacts.Model, StopReason: responseFacts.StopReason, Op: responseFacts.Op,
+			Input: responseFacts.Input, Output: responseFacts.Output, CacheRead: responseFacts.CacheRead,
+			Think: responseFacts.Think, Text: responseFacts.Text, Tool: responseFacts.Tool,
+			Spawned: responseFacts.Spawned,
+		}
+		if responseFacts.ErrType != "" {
+			obs.Problem = &Problem{Type: responseFacts.ErrType, Message: responseFacts.ErrMsg}
+		}
 	default:
 		obs.ResponseErr = errors.New("unknown vendor path")
 	}
@@ -261,7 +307,21 @@ type ToolResultRef struct {
 // InspectRequest performs every on-demand interpretation the dashboard needs
 // in one parse-oriented module call.
 func InspectRequest(body []byte) (RequestInspection, error) {
-	kind := kindForRequest(body)
+	return inspectRequest(kindForRequest(body), body)
+}
+
+// InspectRequestAt uses the endpoint that carried a capture when it is known.
+// Chat Completions and Anthropic Messages both carry a top-level messages field,
+// so the path is the authoritative dialect discriminator.
+func InspectRequestAt(path string, body []byte) (RequestInspection, error) {
+	kind := KindForPath(path)
+	if kind == Unknown {
+		kind = kindForRequest(body)
+	}
+	return inspectRequest(kind, body)
+}
+
+func inspectRequest(kind Kind, body []byte) (RequestInspection, error) {
 	switch kind {
 	case Anthropic:
 		facts, err := anthropic.ParseRequest(body)
@@ -334,6 +394,42 @@ func InspectRequest(body []byte) (RequestInspection, error) {
 			view.ToolResults = append(view.ToolResults, ToolResultRef{ToolUseID: item.ToolUseID, Bytes: item.Bytes})
 		}
 		return view, nil
+
+	case OpenAIChat:
+		facts, err := openai.ParseChatRequest(body)
+		if err != nil {
+			return RequestInspection{}, err
+		}
+		bd, err := openai.BreakdownChatRequest(body)
+		if err != nil {
+			return RequestInspection{}, err
+		}
+		view := RequestInspection{
+			Kind: kind,
+			Facts: RequestFacts{
+				Model: facts.Model, SessionID: facts.SessionID, ParentSessionID: facts.ParentSessionID,
+				Stream: facts.Stream, Turns: facts.Turns, ToolCount: facts.ToolCount, MaxTokens: facts.MaxTokens,
+				TotalBytes: facts.TotalBytes, ToolsBytes: facts.ToolsBytes, SystemBytes: facts.SystemBytes,
+				MessagesBytes: facts.MessagesBytes, Label: facts.Label, FirstText: facts.FirstText,
+				Prefix: openai.ChatPrefixHashes(body),
+			},
+			Breakdown: Breakdown{
+				Tools: convertOpenAITools(bd.Tools), System: convertOpenAISystem(bd.System),
+				Messages: convertOpenAIMessages(bd.Messages),
+				Flags: Flags{
+					Thinking: bd.Flags.Thinking, ContextManagement: bd.Flags.ContextManagement,
+					OutputConfig: bd.Flags.OutputConfig,
+				},
+			},
+			LatestUserText: openai.LatestChatUserText(body),
+		}
+		for _, item := range openai.ChatResultsInContext(body) {
+			view.Results = append(view.Results, ResultItem{Name: item.Name, Bytes: item.Bytes, N: item.N})
+		}
+		for _, item := range openai.ChatToolResults(body) {
+			view.ToolResults = append(view.ToolResults, ToolResultRef{ToolUseID: item.ToolUseID, Bytes: item.Bytes})
+		}
+		return view, nil
 	default:
 		return RequestInspection{}, errors.New("unknown request dialect")
 	}
@@ -348,9 +444,44 @@ func kindForRequest(body []byte) Kind {
 		return OpenAI
 	}
 	if _, ok := top["messages"]; ok {
+		if isChatRequest(top) {
+			return OpenAIChat
+		}
 		return Anthropic
 	}
 	return Unknown
+}
+
+func isChatRequest(top map[string]json.RawMessage) bool {
+	for _, key := range []string{"max_completion_tokens", "stream_options", "response_format", "functions", "function_call"} {
+		if _, ok := top[key]; ok {
+			return true
+		}
+	}
+	var tools []json.RawMessage
+	if raw, ok := top["tools"]; ok && json.Unmarshal(raw, &tools) == nil {
+		for _, raw := range tools {
+			var tool struct {
+				Function json.RawMessage `json:"function"`
+			}
+			if json.Unmarshal(raw, &tool) == nil && len(tool.Function) > 0 {
+				return true
+			}
+		}
+	}
+	var messages []json.RawMessage
+	if raw, ok := top["messages"]; !ok || json.Unmarshal(raw, &messages) != nil {
+		return false
+	}
+	for _, raw := range messages {
+		var message struct {
+			Role string `json:"role"`
+		}
+		if json.Unmarshal(raw, &message) == nil && (message.Role == "developer" || message.Role == "tool") {
+			return true
+		}
+	}
+	return false
 }
 
 type Call struct {
@@ -368,6 +499,13 @@ func ResponseCalls(body []byte) []Call {
 	if _, ok := top["output"]; ok {
 		var out []Call
 		for _, call := range openai.ResponseCalls(body) {
+			out = append(out, Call{ID: call.ID, Name: call.Name, Arguments: call.Arguments})
+		}
+		return out
+	}
+	if _, ok := top["choices"]; ok {
+		var out []Call
+		for _, call := range openai.ChatResponseCalls(body) {
 			out = append(out, Call{ID: call.ID, Name: call.Name, Arguments: call.Arguments})
 		}
 		return out

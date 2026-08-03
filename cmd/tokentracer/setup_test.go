@@ -42,7 +42,9 @@ func TestEnvFileRoundTripAndPrecedence(t *testing.T) {
 
 func TestLaunchLines(t *testing.T) {
 	anthropic := launchLines(config{Port: "8787", Upstream: "https://api.anthropic.com"})
-	if len(anthropic) != 1 || anthropic[0] != "Claude Code: ANTHROPIC_BASE_URL=http://localhost:8787 claude" {
+	if len(anthropic) != 2 ||
+		anthropic[0] != "Claude Code: ANTHROPIC_BASE_URL=http://localhost:8787 claude" ||
+		anthropic[1] != `OpenCode: OPENCODE_CONFIG_CONTENT='{"provider":{"anthropic":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode` {
 		t.Errorf("anthropic launch lines = %q", anthropic)
 	}
 	vertex := launchLines(config{Port: "8787", Upstream: "https://us-east5-aiplatform.googleapis.com/v1"})
@@ -60,5 +62,9 @@ func TestLaunchLines(t *testing.T) {
 		if lines[1] != `OpenCode: OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode` {
 			t.Errorf("OpenCode launch line = %q", lines[1])
 		}
+	}
+	other := launchLines(config{Port: "8787", Upstream: "https://openrouter.ai/api/v1"})
+	if len(other) != 1 || other[0] != "OpenCode: set the selected provider's options.baseURL to http://localhost:8787" {
+		t.Errorf("other-provider launch lines = %q", other)
 	}
 }

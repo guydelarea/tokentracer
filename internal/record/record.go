@@ -234,7 +234,7 @@ func buildResponse(row *store.Row, ex Exchange, best *int, li *linkInfo) (respJS
 		}
 	}()
 
-	obs := observeResponse(ex.Path, ex.Status, ex.Streamed, ex.RespBody)
+	obs := observeResponse(ex.Path, ex.Status, row.Streamed, ex.RespBody)
 	if obs.ResponseErr != nil {
 		setErr(row, rungParse, "parse", "response: "+obs.ResponseErr.Error(), best)
 		return respJSON

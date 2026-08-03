@@ -335,6 +335,73 @@ func TestEndToEndOpenAIResponses(t *testing.T) {
 	}
 }
 
+func TestEndToEndOpenAIChatCompletions(t *testing.T) {
+	sse := []byte("data: " +
+		`{"id":"chat_e2e","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"Running"}}]}` + "\n\n" +
+		"data: " +
+		`{"id":"chat_e2e","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":" tests"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":60},"completion_tokens":30,"completion_tokens_details":{"reasoning_tokens":10}}}` + "\n\n" +
+		"data: [DONE]\n\n")
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("upstream path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write(sse)
+	}))
+	t.Cleanup(up.Close)
+
+	a, front := newTestApp(t, up.URL+"/v1")
+	request := []byte(`{
+	  "model":"gpt-4o-mini","stream":true,"user":"opencode-e2e",
+	  "tools":[{"type":"function","function":{"name":"exec_command","description":"run a command"}}],
+	  "messages":[
+	    {"role":"developer","content":"You are OpenCode."},
+	    {"role":"user","content":"Run all tests"}
+	  ]
+	}`)
+	resp, err := http.Post(front.URL+"/chat/completions", "application/json", bytes.NewReader(request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, sse) {
+		t.Fatalf("client stream changed: got %d bytes, want %d", len(got), len(sse))
+	}
+
+	a.recorder.Close()
+	rows, err := a.store.Recent(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.SessionID != "opencode-e2e" || row.ModelReq != "gpt-4o-mini" || row.ModelServed != "gpt-4o-mini" {
+		t.Errorf("request identity = %+v", row)
+	}
+	if row.InputTokens == nil || *row.InputTokens != 40 ||
+		row.CacheReadTokens == nil || *row.CacheReadTokens != 60 ||
+		row.OutputTokens == nil || *row.OutputTokens != 30 {
+		t.Errorf("normalized usage = in:%v read:%v out:%v", row.InputTokens, row.CacheReadTokens, row.OutputTokens)
+	}
+	if row.ThinkTokens != 10 || row.TextTokens != 20 || row.SystemBytes == 0 || row.MessagesBytes == 0 {
+		t.Errorf("request/response shape = %+v", row)
+	}
+
+	capture := getCapture(t, front, row.ID)
+	if len(capture.Breakdown.Tools) != 1 || capture.Breakdown.Tools[0].Name != "exec_command" {
+		t.Errorf("breakdown tools = %+v", capture.Breakdown.Tools)
+	}
+	if len(capture.Breakdown.System) != 1 || len(capture.Breakdown.Messages) != 1 {
+		t.Errorf("breakdown context = %+v", capture.Breakdown)
+	}
+}
+
 // Claude Code fires parallel requests as a matter of course. Both must land.
 func TestConcurrentStreamsBothLand(t *testing.T) {
 	up := fakeUpstream(t, replaySSE(t))
@@ -496,6 +563,8 @@ type captureResponse struct {
 			Name  string `json:"name"`
 			Bytes int    `json:"bytes"`
 		} `json:"tools"`
+		System   []json.RawMessage `json:"system"`
+		Messages []json.RawMessage `json:"messages"`
 	} `json:"breakdown"`
 }
 

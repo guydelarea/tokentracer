@@ -17,6 +17,9 @@ func TestRecordable(t *testing.T) {
 		{http.MethodPost, "/responses", true},
 		{http.MethodPost, "/v1/responses", true},
 		{http.MethodPost, "/backend-api/codex/responses", true},
+		{http.MethodPost, "/chat/completions", true},
+		{http.MethodPost, "/v1/chat/completions", true},
+		{http.MethodPost, "/openai/deployments/coder/chat/completions", true},
 		{http.MethodPost, "/responses/compact", false},
 		{http.MethodPost, "/v1/messages/count_tokens", false},
 		{http.MethodGet, "/responses", false},
@@ -25,6 +28,45 @@ func TestRecordable(t *testing.T) {
 		if got := Recordable(tt.method, tt.path); got != tt.want {
 			t.Errorf("Recordable(%q, %q) = %v, want %v", tt.method, tt.path, got, tt.want)
 		}
+	}
+}
+
+func TestObserveOpenAIChatCompletions(t *testing.T) {
+	request := []byte(`{
+	  "model":"qwen3-coder","stream":true,"max_completion_tokens":1000,"user":"opencode-session",
+	  "tools":[{"type":"function","function":{"name":"bash","description":"run a command"}}],
+	  "messages":[
+	    {"role":"developer","content":"Use tools when needed."},
+	    {"role":"user","content":"Run the tests"}
+	  ]
+	}`)
+	response := []byte("data: " +
+		`{"id":"chat_1","object":"chat.completion.chunk","model":"qwen3-coder","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"go test"}}]}}]}` + "\n\n" +
+		"data: " +
+		`{"id":"chat_1","object":"chat.completion.chunk","model":"qwen3-coder","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":" ./...\"}"}}]},"finish_reason":"tool_calls"}]}` + "\n\n" +
+		"data: " +
+		`{"id":"chat_1","object":"chat.completion.chunk","model":"qwen3-coder","choices":[],"usage":{"prompt_tokens":80,"prompt_tokens_details":{"cached_tokens":20},"completion_tokens":30,"completion_tokens_details":{"reasoning_tokens":5}}}` + "\n\n" +
+		"data: [DONE]\n\n")
+
+	requestObs := ObserveRequest("/v1/chat/completions", request)
+	responseObs := ObserveResponse("/v1/chat/completions", 200, true, response)
+	if requestObs.RequestErr != nil || responseObs.ResponseErr != nil || responseObs.Problem != nil {
+		t.Fatalf("Observe errors: request=%v response=%v problem=%+v", requestObs.RequestErr, responseObs.ResponseErr, responseObs.Problem)
+	}
+	if requestObs.Kind != OpenAIChat || requestObs.Request.SessionID != "opencode-session" || requestObs.Request.ToolCount != 1 {
+		t.Errorf("request observation = %+v", requestObs)
+	}
+	if requestObs.Request.SystemBytes == 0 || requestObs.Request.MessagesBytes == 0 {
+		t.Errorf("request byte split = %+v", requestObs.Request)
+	}
+	if responseObs.Response.Input != 60 || responseObs.Response.CacheRead != 20 || responseObs.Response.Output != 30 || responseObs.Response.Think != 5 {
+		t.Errorf("response usage = %+v", responseObs.Response)
+	}
+	if responseObs.Response.Op != "tool_use · bash — go test ./..." {
+		t.Errorf("response op = %q", responseObs.Response.Op)
+	}
+	if !bytes.Contains(responseObs.ResponseCapture, []byte(`go test ./...`)) {
+		t.Errorf("assembled capture did not merge tool arguments: %s", responseObs.ResponseCapture)
 	}
 }
 
@@ -78,9 +120,19 @@ func TestInspectAndResponseCallsRouteBothDialects(t *testing.T) {
 		t.Errorf("Anthropic inspection = %+v", claude)
 	}
 
+	chatRequest := []byte(`{"model":"m","messages":[{"role":"user","content":"hello"}]}`)
+	chat, err := InspectRequestAt("/chat/completions", chatRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat.Kind != OpenAIChat || chat.LatestUserText != "hello" {
+		t.Errorf("chat inspection = %+v", chat)
+	}
+
 	openAIResponse := []byte(`{"object":"response","output":[{"type":"function_call","call_id":"c1","name":"bash","arguments":"{\"command\":\"true\"}"}]}`)
 	claudeResponse := []byte(`{"type":"message","content":[{"type":"tool_use","id":"c2","name":"Bash","input":{"command":"true"}}]}`)
-	for name, body := range map[string][]byte{"openai": openAIResponse, "anthropic": claudeResponse} {
+	chatResponse := []byte(`{"object":"chat.completion","choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c3","type":"function","function":{"name":"bash","arguments":"{\"command\":\"true\"}"}}]}}]}`)
+	for name, body := range map[string][]byte{"openai": openAIResponse, "anthropic": claudeResponse, "chat": chatResponse} {
 		calls := ResponseCalls(body)
 		if len(calls) != 1 || calls[0].ID == "" {
 			t.Errorf("%s calls = %+v", name, calls)
