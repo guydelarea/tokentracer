@@ -86,6 +86,38 @@ OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"http://loc
 
 Open [localhost:8787/dashboard](http://localhost:8787/dashboard) and work as usual. Rows land within two seconds.
 
+### Verify OpenCode
+
+This sends one real prompt through your OpenAI or ChatGPT account, so use a
+small model if you prefer. It does not save an OpenCode configuration or read
+your credentials.
+
+1. Start TokenTracer and select either *Codex / OpenCode — ChatGPT login* or
+   *Codex / OpenCode — OpenAI API key* in the setup wizard:
+
+   ```bash
+   go run ./cmd/tokentracer setup
+   go run ./cmd/tokentracer
+   ```
+
+2. In another terminal, list the OpenAI models available to your OpenCode
+   account and substitute one for `<model>` below:
+
+   ```bash
+   opencode models openai
+   OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"http://localhost:8787"}}}}' \
+     opencode run --model openai/<model> 'Reply with exactly: TokenTracer works'
+   ```
+
+3. Open [localhost:8787/dashboard](http://localhost:8787/dashboard). Within
+   two seconds, it should show one OpenAI session containing the test prompt,
+   its token usage, and its API-equivalent cost. Click the session to inspect
+   the request and assembled response.
+
+If no session appears, make sure the selected OpenCode model begins with
+`openai/`, keep TokenTracer running while you invoke OpenCode, and confirm the
+setup wizard selected the same authentication method that OpenCode uses.
+
 Build a static binary:
 
 ```bash
