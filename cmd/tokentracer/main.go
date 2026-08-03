@@ -127,10 +127,10 @@ func runSetup() {
 	}
 
 	fmt.Println("tokentracer: first-run setup — which client?")
-	fmt.Println("  1) Claude Code — Anthropic API (default)")
+	fmt.Println("  1) Claude Code / Pi — Anthropic API (default)")
 	fmt.Println("  2) Claude Code — Vertex AI")
-	fmt.Println("  3) Codex / OpenCode — ChatGPT login")
-	fmt.Println("  4) Codex / OpenCode — OpenAI API key")
+	fmt.Println("  3) Codex / OpenCode / Pi — ChatGPT login")
+	fmt.Println("  4) Codex / OpenCode / Pi — OpenAI API key")
 	fmt.Println("  5) Other — paste an upstream base URL")
 
 	var up string
@@ -175,18 +175,28 @@ func launchLines(cfg config) []string {
 		return []string{"Claude Code: CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=" + base + " claude"}
 	}
 	if strings.Contains(cfg.Upstream, "api.openai.com") || strings.Contains(cfg.Upstream, "backend-api/codex") {
+		provider := "openai"
+		if strings.Contains(cfg.Upstream, "backend-api/codex") {
+			provider = "openai-codex"
+		}
 		return []string{
 			fmt.Sprintf(`Codex: codex -c 'openai_base_url="%s"'`, base),
 			fmt.Sprintf(`OpenCode: OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"%s"}}}}' opencode`, base),
+			piLaunchLine(provider, base),
 		}
 	}
 	if strings.Contains(cfg.Upstream, "api.anthropic.com") {
 		return []string{
 			"Claude Code: ANTHROPIC_BASE_URL=" + base + " claude",
 			fmt.Sprintf(`OpenCode: OPENCODE_CONFIG_CONTENT='{"provider":{"anthropic":{"options":{"baseURL":"%s"}}}}' opencode`, base),
+			piLaunchLine("anthropic", base),
 		}
 	}
-	return []string{"OpenCode: set the selected provider's options.baseURL to " + base}
+	return []string{"OpenCode/Pi: set the selected provider's base URL to " + base}
+}
+
+func piLaunchLine(provider, base string) string {
+	return fmt.Sprintf(`Pi: set ~/.pi/agent/models.json providers.%s.baseUrl="%s", then run pi --provider %s`, provider, base, provider)
 }
 
 // app is the wiring: store → recorder → proxy, plus the dashboard reading the

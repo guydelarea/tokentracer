@@ -42,18 +42,19 @@ func TestEnvFileRoundTripAndPrecedence(t *testing.T) {
 
 func TestLaunchLines(t *testing.T) {
 	anthropic := launchLines(config{Port: "8787", Upstream: "https://api.anthropic.com"})
-	if len(anthropic) != 2 ||
+	if len(anthropic) != 3 ||
 		anthropic[0] != "Claude Code: ANTHROPIC_BASE_URL=http://localhost:8787 claude" ||
-		anthropic[1] != `OpenCode: OPENCODE_CONFIG_CONTENT='{"provider":{"anthropic":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode` {
+		anthropic[1] != `OpenCode: OPENCODE_CONFIG_CONTENT='{"provider":{"anthropic":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode` ||
+		anthropic[2] != `Pi: set ~/.pi/agent/models.json providers.anthropic.baseUrl="http://localhost:8787", then run pi --provider anthropic` {
 		t.Errorf("anthropic launch lines = %q", anthropic)
 	}
 	vertex := launchLines(config{Port: "8787", Upstream: "https://us-east5-aiplatform.googleapis.com/v1"})
 	if len(vertex) != 1 || vertex[0] != "Claude Code: CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=http://localhost:8787 claude" {
 		t.Errorf("vertex launch lines = %q", vertex)
 	}
-	for _, upstream := range []string{"https://api.openai.com/v1", "https://chatgpt.com/backend-api/codex"} {
+	for upstream, provider := range map[string]string{"https://api.openai.com/v1": "openai", "https://chatgpt.com/backend-api/codex": "openai-codex"} {
 		lines := launchLines(config{Port: "8787", Upstream: upstream})
-		if len(lines) != 2 {
+		if len(lines) != 3 {
 			t.Fatalf("OpenAI launch lines = %q", lines)
 		}
 		if lines[0] != `Codex: codex -c 'openai_base_url="http://localhost:8787"'` {
@@ -62,9 +63,13 @@ func TestLaunchLines(t *testing.T) {
 		if lines[1] != `OpenCode: OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode` {
 			t.Errorf("OpenCode launch line = %q", lines[1])
 		}
+		wantPi := `Pi: set ~/.pi/agent/models.json providers.` + provider + `.baseUrl="http://localhost:8787", then run pi --provider ` + provider
+		if lines[2] != wantPi {
+			t.Errorf("Pi launch line = %q", lines[2])
+		}
 	}
 	other := launchLines(config{Port: "8787", Upstream: "https://openrouter.ai/api/v1"})
-	if len(other) != 1 || other[0] != "OpenCode: set the selected provider's options.baseURL to http://localhost:8787" {
+	if len(other) != 1 || other[0] != "OpenCode/Pi: set the selected provider's base URL to http://localhost:8787" {
 		t.Errorf("other-provider launch lines = %q", other)
 	}
 }
