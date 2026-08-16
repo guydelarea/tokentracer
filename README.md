@@ -61,8 +61,8 @@ tokentracer: first-run setup — which client?
   1) Claude Code / Pi — Anthropic API (default)
   2) Claude Code — Vertex AI
   3) Claude Code — LiteLLM or another gateway speaking the Anthropic API
-  4) Codex / OpenCode / Pi — ChatGPT login
-  5) Codex / OpenCode / Pi — OpenAI API key
+  4) Codex / OpenCode / Pi — ChatGPT login / OAuth (chatgpt.com)
+  5) Codex / OpenCode / Pi — OpenAI API key (api.openai.com; not ChatGPT OAuth)
   6) Other — paste an upstream base URL
 ```
 
@@ -74,9 +74,11 @@ Code and the gateway, and the gateway keeps doing its own routing — TokenTrace
 records what Claude Code sent and what came back, whichever model LiteLLM chose
 to serve it with.
 
-Pick 4 for the existing ChatGPT OAuth login used by Codex, OpenCode, or Pi, or
-5 when the client authenticates with an OpenAI API key. TokenTracer never reads
-or stores that credential; the client's `Authorization` header passes through.
+Pick 4 for the existing ChatGPT OAuth login used by Codex, OpenCode, or Pi. Pick
+5 only when the client authenticates with an OpenAI API key. These upstreams
+are not interchangeable: sending a ChatGPT OAuth token to the public OpenAI API
+fails with `401 Missing scopes: api.responses.write`. TokenTracer never reads or
+stores the credential; the client's `Authorization` header passes through.
 Pick 1 for anything speaking the Anthropic API — Claude Code, Pi, and
 OpenCode's `anthropic` provider alike.
 
@@ -95,10 +97,10 @@ ANTHROPIC_BASE_URL=http://localhost:8787 \
   ANTHROPIC_AUTH_TOKEN="$LITELLM_KEY" \
   ANTHROPIC_MODEL=claude-sonnet-5 claude
 
-# Codex (ChatGPT login or OpenAI API)
+# Codex (setup 4 for ChatGPT login/OAuth; setup 5 for an OpenAI API key)
 codex -c 'openai_base_url="http://localhost:8787"'
 
-# OpenCode (ChatGPT login or OpenAI API)
+# OpenCode (setup 4 for ChatGPT login/OAuth; setup 5 for an OpenAI API key)
 OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode
 
 # OpenCode on Anthropic — override that provider instead (pick 1 in setup)
@@ -156,6 +158,13 @@ If no session appears: keep TokenTracer running while you invoke the client,
 confirm the wizard selected the same authentication method the client uses, and
 check that the client is actually on the proxied provider — for OpenCode, that
 the model begins with the provider you overrode, such as `openai/`.
+
+If the dashboard shows `401 Missing scopes: api.responses.write`, the client is
+using ChatGPT OAuth while TokenTracer is forwarding to the public OpenAI API.
+Run `go run ./cmd/tokentracer setup`, choose 4 for ChatGPT login/OAuth, then
+restart both TokenTracer and the client. If `UPSTREAM` is set in your shell, unset
+or update it first because it overrides `.env`. Choose 5 only for a real OpenAI
+API key.
 
 Build a static binary:
 
@@ -294,7 +303,7 @@ Environment variables, or `KEY=value` lines in `./.env` (written by the first-ru
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PORT` | `8787` | Local listen port (proxy, dashboard and API share it) |
-| `UPSTREAM` | `https://api.anthropic.com` | Upstream base URL (`https://chatgpt.com/backend-api/codex` for ChatGPT auth, `https://api.openai.com/v1` for the OpenAI API, or `https://<region>-aiplatform.googleapis.com/v1` for Vertex) |
+| `UPSTREAM` | `https://api.anthropic.com` | Upstream base URL (`https://chatgpt.com/backend-api/codex` for ChatGPT OAuth, `https://api.openai.com/v1` only for an OpenAI API key, or `https://<region>-aiplatform.googleapis.com/v1` for Vertex) |
 | `TOKENTRACER_DB` | `./tokentracer.db` | SQLite path, created on first run |
 
 ### Development

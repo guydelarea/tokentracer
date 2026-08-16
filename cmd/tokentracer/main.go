@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -120,8 +121,8 @@ func chooseUpstream(ask func(prompt string) string) string {
 	fmt.Println("  1) Claude Code / Pi — Anthropic API (default)")
 	fmt.Println("  2) Claude Code — Vertex AI")
 	fmt.Println("  3) Claude Code — LiteLLM or another gateway speaking the Anthropic API")
-	fmt.Println("  4) Codex / OpenCode / Pi — ChatGPT login")
-	fmt.Println("  5) Codex / OpenCode / Pi — OpenAI API key")
+	fmt.Println("  4) Codex / OpenCode / Pi — ChatGPT login / OAuth (chatgpt.com)")
+	fmt.Println("  5) Codex / OpenCode / Pi — OpenAI API key (api.openai.com; not ChatGPT OAuth)")
 	fmt.Println("  6) Other — paste an upstream base URL")
 
 	switch ask("Choice [1]: ") {
@@ -203,14 +204,10 @@ func launchLines(cfg config) []string {
 	if strings.Contains(cfg.Upstream, "googleapis") {
 		return []string{"Claude Code: CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=" + base + " claude"}
 	}
-	if strings.Contains(cfg.Upstream, "api.openai.com") || strings.Contains(cfg.Upstream, "backend-api/codex") {
-		provider := "openai"
-		if strings.Contains(cfg.Upstream, "backend-api/codex") {
-			provider = "openai-codex"
-		}
+	if auth, provider, ok := openAIAuth(cfg.Upstream); ok {
 		return []string{
-			fmt.Sprintf(`Codex: codex -c 'openai_base_url="%s"'`, base),
-			fmt.Sprintf(`OpenCode: OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"%s"}}}}' opencode`, base),
+			fmt.Sprintf(`Codex (%s): codex -c 'openai_base_url="%s"'`, auth, base),
+			fmt.Sprintf(`OpenCode (%s): OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"%s"}}}}' opencode`, auth, base),
 			piLaunchLine(provider, base),
 		}
 	}
@@ -233,6 +230,32 @@ func launchLines(cfg config) []string {
 		fmt.Sprintf(`Codex: codex -c 'openai_base_url="%s"'`, base),
 		"OpenCode/Pi: set the selected provider's base URL to " + base,
 	}
+}
+
+func openAIAuth(upstream string) (auth, provider string, ok bool) {
+	u, err := url.Parse(upstream)
+	if err != nil {
+		return "", "", false
+	}
+	switch {
+	case strings.EqualFold(u.Hostname(), "chatgpt.com") && strings.Contains(u.Path, "/backend-api/codex"):
+		return "ChatGPT login/OAuth", "openai-codex", true
+	case strings.EqualFold(u.Hostname(), "api.openai.com"):
+		return "OpenAI API key", "openai", true
+	default:
+		return "", "", false
+	}
+}
+
+func authNotice(upstream string) string {
+	_, provider, ok := openAIAuth(upstream)
+	if !ok {
+		return ""
+	}
+	if provider == "openai-codex" {
+		return "ChatGPT login/OAuth required; do not use an OpenAI API key"
+	}
+	return `OpenAI API key required; ChatGPT OAuth will fail with "Missing scopes: api.responses.write"`
 }
 
 func piLaunchLine(provider, base string) string {
@@ -362,6 +385,9 @@ func main() {
 
 	go func() {
 		log.Printf("tokentracer: http://%s → %s  (db: %s)", addr, cfg.Upstream, cfg.DBPath)
+		if notice := authNotice(cfg.Upstream); notice != "" {
+			log.Printf("tokentracer: auth — %s", notice)
+		}
 		for _, line := range launchLines(cfg) {
 			log.Printf("tokentracer: point your client at it — %s", line)
 		}
