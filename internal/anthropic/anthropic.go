@@ -492,32 +492,58 @@ func commandOf(input json.RawMessage) string {
 // wireUsage decodes usage with pointers so a merge can be "later value wins per
 // key": a key the event didn't send must not zero the value the last one did.
 type wireUsage struct {
-	In            *int64 `json:"input_tokens"`
-	Out           *int64 `json:"output_tokens"`
-	CacheRead     *int64 `json:"cache_read_input_tokens"`
+	In        *int64 `json:"input_tokens"`
+	Out       *int64 `json:"output_tokens"`
+	CacheRead *int64 `json:"cache_read_input_tokens"`
+
+	// CacheWritten is the flat total of cache-creation tokens. Anthropic sends it
+	// alongside the per-TTL split below; a gateway that rebuilds the response
+	// sends it alone — LiteLLM's Anthropic endpoint emits exactly these two cache
+	// keys and no breakdown, so without this field every write through a gateway
+	// reads as zero and the request bills as if the prefix had been free.
+	CacheWritten *int64 `json:"cache_creation_input_tokens"`
+
 	CacheCreation *struct {
 		W5m *int64 `json:"ephemeral_5m_input_tokens"`
 		W1h *int64 `json:"ephemeral_1h_input_tokens"`
 	} `json:"cache_creation"`
 }
 
-func (u *Usage) merge(w wireUsage) {
+// usageMerge folds the usage events of one response into a single Usage. It
+// remembers whether the per-TTL breakdown has been seen, because the flat total
+// is W5m+W1h: folding a later total into W5m would move 1-hour writes onto the
+// 5-minute rate and underbill them. The breakdown wins wherever it exists, and
+// the total only fills the gap it leaves.
+type usageMerge struct {
+	Usage
+	split bool
+}
+
+func (m *usageMerge) merge(w wireUsage) {
 	if w.In != nil {
-		u.In = *w.In
+		m.In = *w.In
 	}
 	if w.Out != nil {
-		u.Out = *w.Out
+		m.Out = *w.Out
 	}
 	if w.CacheRead != nil {
-		u.CacheRead = *w.CacheRead
+		m.CacheRead = *w.CacheRead
 	}
 	if w.CacheCreation != nil {
+		m.split = true
 		if w.CacheCreation.W5m != nil {
-			u.W5m = *w.CacheCreation.W5m
+			m.W5m = *w.CacheCreation.W5m
 		}
 		if w.CacheCreation.W1h != nil {
-			u.W1h = *w.CacheCreation.W1h
+			m.W1h = *w.CacheCreation.W1h
 		}
+		return
+	}
+	// No split available. A total on its own is a 5-minute write: it is the only
+	// TTL a client gets without asking for the 1-hour beta, and reporting it as
+	// nothing at all would be the one wrong answer.
+	if w.CacheWritten != nil && !m.split {
+		m.W5m, m.W1h = *w.CacheWritten, 0
 	}
 }
 
@@ -581,6 +607,7 @@ func DecodeSSE(body []byte) (Response, error) {
 	blocks := map[int]*pending{}
 	var order []int
 	started := false
+	var usage usageMerge
 
 	sc := bufio.NewScanner(bytes.NewReader(body))
 	sc.Buffer(make([]byte, 0, 64<<10), maxSSELine)
@@ -610,7 +637,7 @@ func DecodeSSE(body []byte) (Response, error) {
 			r.ID = ev.Message.ID
 			r.Role = ev.Message.Role
 			r.Model = ev.Message.Model
-			r.Usage.merge(ev.Message.Usage)
+			usage.merge(ev.Message.Usage)
 
 		case "content_block_start":
 			if ev.ContentBlock == nil {
@@ -653,7 +680,7 @@ func DecodeSSE(body []byte) (Response, error) {
 				r.StopReason = ev.Delta.StopReason
 			}
 			if ev.Usage != nil {
-				r.Usage.merge(*ev.Usage) // later wins, per key
+				usage.merge(*ev.Usage) // later wins, per key
 			}
 
 		case "error":
@@ -662,6 +689,8 @@ func DecodeSSE(body []byte) (Response, error) {
 			}
 		}
 	}
+
+	r.Usage = usage.Usage
 
 	for _, i := range order {
 		p := blocks[i]
@@ -710,7 +739,9 @@ func DecodeJSON(body []byte) (Response, error) {
 	if r.Content == nil {
 		r.Content = []Block{}
 	}
-	r.Usage.merge(m.Usage)
+	var usage usageMerge
+	usage.merge(m.Usage)
+	r.Usage = usage.Usage
 	return r, nil
 }
 

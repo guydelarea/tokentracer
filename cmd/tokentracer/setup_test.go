@@ -68,8 +68,49 @@ func TestLaunchLines(t *testing.T) {
 			t.Errorf("Pi launch line = %q", lines[2])
 		}
 	}
-	other := launchLines(config{Port: "8787", Upstream: "https://openrouter.ai/api/v1"})
-	if len(other) != 1 || other[0] != "OpenCode/Pi: set the selected provider's base URL to http://localhost:8787" {
-		t.Errorf("other-provider launch lines = %q", other)
+	// A gateway serves every dialect it was configured for on one base URL, so
+	// every client that could be pointed at it gets a line.
+	gateway := launchLines(config{Port: "8787", Upstream: "http://localhost:4000"})
+	if len(gateway) != 3 ||
+		gateway[0] != "Claude Code: ANTHROPIC_BASE_URL=http://localhost:8787 ANTHROPIC_AUTH_TOKEN=<gateway key> claude" ||
+		gateway[1] != `Codex: codex -c 'openai_base_url="http://localhost:8787"'` ||
+		gateway[2] != "OpenCode/Pi: set the selected provider's base URL to http://localhost:8787" {
+		t.Errorf("gateway launch lines = %q", gateway)
+	}
+}
+
+// The wizard's answers, without a terminal: each choice implies one upstream.
+func TestChooseUpstream(t *testing.T) {
+	answers := func(replies ...string) func(string) string {
+		i := 0
+		return func(string) string {
+			if i >= len(replies) {
+				return ""
+			}
+			reply := replies[i]
+			i++
+			return reply
+		}
+	}
+	cases := map[string]struct {
+		replies []string
+		want    string
+	}{
+		"default":            {[]string{""}, "https://api.anthropic.com"},
+		"vertex":             {[]string{"2", "us-east5"}, "https://us-east5-aiplatform.googleapis.com/v1"},
+		"litellm default":    {[]string{"3", ""}, liteLLMDefault},
+		"litellm pasted":     {[]string{"3", "http://gateway.internal:4000/"}, "http://gateway.internal:4000"},
+		"litellm bare host":  {[]string{"3", "gateway.internal:4000"}, "http://gateway.internal:4000"},
+		"chatgpt login":      {[]string{"4"}, "https://chatgpt.com/backend-api/codex"},
+		"openai api key":     {[]string{"5"}, "https://api.openai.com/v1"},
+		"other pasted":       {[]string{"6", "https://openrouter.ai/api/v1"}, "https://openrouter.ai/api/v1"},
+		"other left blank":   {[]string{"6", ""}, "https://api.anthropic.com"},
+		"unknown choice":     {[]string{"nine"}, "https://api.anthropic.com"},
+		"litellm https kept": {[]string{"3", "https://gateway.example/llm"}, "https://gateway.example/llm"},
+	}
+	for name, tc := range cases {
+		if got := chooseUpstream(answers(tc.replies...)); got != tc.want {
+			t.Errorf("%s: chooseUpstream(%q) = %q, want %q", name, tc.replies, got, tc.want)
+		}
 	}
 }

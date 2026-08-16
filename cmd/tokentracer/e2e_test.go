@@ -402,6 +402,92 @@ func TestEndToEndOpenAIChatCompletions(t *testing.T) {
 	}
 }
 
+// Claude Code through a LiteLLM gateway: the Messages API under the gateway's
+// own route prefix, a route-prefixed model name, and usage rebuilt with the flat
+// cache-creation total instead of Anthropic's per-TTL split.
+func TestEndToEndClaudeCodeViaLiteLLM(t *testing.T) {
+	sse := []byte("event: message_start\n" +
+		`data: {"type":"message_start","message":{"id":"msg_litellm","type":"message","role":"assistant","model":"claude-sonnet-5","content":[],"usage":{"input_tokens":40,"output_tokens":1,"cache_read_input_tokens":60,"cache_creation_input_tokens":20}}}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"TokenTracer works"}}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":30}}` + "\n\n")
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/anthropic/v1/messages" {
+			t.Errorf("upstream path = %q, want the gateway route the client asked for", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-litellm" {
+			t.Errorf("Authorization = %q, want the client's gateway key passed through", got)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write(sse)
+	}))
+	t.Cleanup(up.Close)
+
+	a, front := newTestApp(t, up.URL)
+	request := []byte(`{
+	  "model":"anthropic/claude-sonnet-5","max_tokens":1000,"stream":true,
+	  "metadata":{"user_id":"{\"session_id\":\"litellm-e2e\"}"},
+	  "tools":[{"name":"Bash","description":"run a command"}],
+	  "messages":[{"role":"user","content":"Reply with exactly: TokenTracer works"}]
+	}`)
+	req, err := http.NewRequest(http.MethodPost, front.URL+"/anthropic/v1/messages", bytes.NewReader(request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer sk-litellm")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, sse) {
+		t.Fatalf("client stream changed: got %d bytes, want %d", len(got), len(sse))
+	}
+
+	a.recorder.Close()
+	rows, err := a.store.Recent(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1 — a gateway-prefixed Messages call is still an exchange", len(rows))
+	}
+	row := rows[0]
+	if row.SessionID != "litellm-e2e" || row.ModelReq != "anthropic/claude-sonnet-5" || row.ModelServed != "claude-sonnet-5" {
+		t.Errorf("request identity = %+v", row)
+	}
+	if row.InputTokens == nil || *row.InputTokens != 40 ||
+		row.CacheReadTokens == nil || *row.CacheReadTokens != 60 ||
+		row.CacheW5mTokens == nil || *row.CacheW5mTokens != 20 ||
+		row.OutputTokens == nil || *row.OutputTokens != 30 {
+		t.Errorf("normalized usage = in:%v read:%v write:%v out:%v",
+			row.InputTokens, row.CacheReadTokens, row.CacheW5mTokens, row.OutputTokens)
+	}
+
+	// The bill follows the model that served it, so the gateway's route prefix on
+	// the requested name costs nothing.
+	stats := getStats(t, front)
+	if stats.Traced != 1 || stats.UnpricedReqs != 0 || stats.Cost <= 0 {
+		t.Errorf("stats = traced:%d unpriced:%d cost:%f", stats.Traced, stats.UnpricedReqs, stats.Cost)
+	}
+	trace := getTrace(t, front, "litellm-e2e")
+	if len(trace.Rows) != 1 || !trace.Rows[0].Priced || trace.Rows[0].Cost.Write <= 0 {
+		t.Errorf("trace row = %+v — the cache write must reach the bill", trace.Rows)
+	}
+	capture := getCapture(t, front, row.ID)
+	if len(capture.Breakdown.Tools) != 1 || capture.Breakdown.Tools[0].Name != "Bash" {
+		t.Errorf("breakdown tools = %+v", capture.Breakdown.Tools)
+	}
+}
+
 // Claude Code fires parallel requests as a matter of course. Both must land.
 func TestConcurrentStreamsBothLand(t *testing.T) {
 	up := fakeUpstream(t, replaySSE(t))

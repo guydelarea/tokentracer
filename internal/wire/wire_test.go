@@ -13,6 +13,8 @@ func TestRecordable(t *testing.T) {
 		want   bool
 	}{
 		{http.MethodPost, "/v1/messages", true},
+		{http.MethodPost, "/anthropic/v1/messages", true}, // LiteLLM's passthrough route
+		{http.MethodPost, "/messages", true},
 		{http.MethodPost, "/v1/projects/p/locations/us/publishers/anthropic/models/claude-sonnet-5:streamRawPredict", true},
 		{http.MethodPost, "/responses", true},
 		{http.MethodPost, "/v1/responses", true},
@@ -67,6 +69,35 @@ func TestObserveOpenAIChatCompletions(t *testing.T) {
 	}
 	if !bytes.Contains(responseObs.ResponseCapture, []byte(`go test ./...`)) {
 		t.Errorf("assembled capture did not merge tool arguments: %s", responseObs.ResponseCapture)
+	}
+}
+
+// Claude Code through LiteLLM: the Messages API under a gateway route prefix,
+// answered with the flat cache-creation total the gateway rebuilds usage into.
+func TestObserveAnthropicThroughGateway(t *testing.T) {
+	request := []byte(`{
+	  "model":"claude-sonnet-5","max_tokens":1000,"stream":true,
+	  "metadata":{"user_id":"{\"session_id\":\"a1b2c3\"}"},
+	  "tools":[{"name":"Bash","description":"run a command"}],
+	  "messages":[{"role":"user","content":"Run the tests"}]
+	}`)
+	response := []byte("event: message_start\n" +
+		`data: {"type":"message_start","message":{"id":"msg_1","role":"assistant","model":"claude-sonnet-5","usage":{"input_tokens":40,"output_tokens":1,"cache_read_input_tokens":60,"cache_creation_input_tokens":20}}}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":30}}` + "\n\n")
+
+	requestObs := ObserveRequest("/anthropic/v1/messages", request)
+	responseObs := ObserveResponse("/anthropic/v1/messages", 200, true, response)
+	if requestObs.RequestErr != nil || responseObs.ResponseErr != nil || responseObs.Problem != nil {
+		t.Fatalf("Observe errors: request=%v response=%v problem=%+v",
+			requestObs.RequestErr, responseObs.ResponseErr, responseObs.Problem)
+	}
+	if requestObs.Kind != Anthropic || requestObs.Request.SessionID != "a1b2c3" || requestObs.Request.ToolCount != 1 {
+		t.Errorf("request observation = %+v", requestObs)
+	}
+	if responseObs.Response.Input != 40 || responseObs.Response.CacheRead != 60 ||
+		responseObs.Response.CacheW5m != 20 || responseObs.Response.Output != 30 {
+		t.Errorf("response usage = %+v", responseObs.Response)
 	}
 }
 

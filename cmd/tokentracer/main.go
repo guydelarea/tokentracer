@@ -109,9 +109,59 @@ func vertexUpstream(region string) string {
 	return fmt.Sprintf("https://%s-aiplatform.googleapis.com/v1", region)
 }
 
+// liteLLMDefault is where a LiteLLM proxy listens out of the box.
+const liteLLMDefault = "http://localhost:4000"
+
+// chooseUpstream runs the wizard's questions through ask and returns the
+// upstream the answer implies. The upstream is the only fact the proxy needs —
+// the launch line is derived from it, so no client name is stored.
+func chooseUpstream(ask func(prompt string) string) string {
+	fmt.Println("tokentracer: first-run setup — which client?")
+	fmt.Println("  1) Claude Code / Pi — Anthropic API (default)")
+	fmt.Println("  2) Claude Code — Vertex AI")
+	fmt.Println("  3) Claude Code — LiteLLM or another gateway speaking the Anthropic API")
+	fmt.Println("  4) Codex / OpenCode / Pi — ChatGPT login")
+	fmt.Println("  5) Codex / OpenCode / Pi — OpenAI API key")
+	fmt.Println("  6) Other — paste an upstream base URL")
+
+	switch ask("Choice [1]: ") {
+	case "2":
+		return vertexUpstream(ask("Vertex region, e.g. us-east5 (blank = global): "))
+	case "3":
+		if up := gatewayUpstream(ask("LiteLLM base URL [" + liteLLMDefault + "]: ")); up != "" {
+			return up
+		}
+		return liteLLMDefault
+	case "4":
+		return "https://chatgpt.com/backend-api/codex"
+	case "5":
+		return "https://api.openai.com/v1"
+	case "6":
+		if up := gatewayUpstream(ask("Upstream base URL: ")); up != "" {
+			return up
+		}
+		return "https://api.anthropic.com"
+	default:
+		return "https://api.anthropic.com"
+	}
+}
+
+// gatewayUpstream normalizes a pasted base URL: a bare host:port gets the http
+// scheme a local gateway is served on, and the trailing slash goes, since every
+// client path is appended to this one.
+func gatewayUpstream(answer string) string {
+	answer = strings.TrimSuffix(strings.TrimSpace(answer), "/")
+	if answer == "" {
+		return ""
+	}
+	if !strings.Contains(answer, "://") {
+		answer = "http://" + answer
+	}
+	return answer
+}
+
 // runSetup asks which client this proxy fronts and saves the upstream that
-// answer implies. The upstream is the only fact the proxy needs — the launch
-// line is derived from it, so no client name is stored.
+// answer implies.
 func runSetup() {
 	r := bufio.NewReader(os.Stdin)
 	// /dev/null passes the TTY check (it is a char device), so EOF is the real
@@ -126,28 +176,7 @@ func runSetup() {
 		return strings.TrimSpace(s)
 	}
 
-	fmt.Println("tokentracer: first-run setup — which client?")
-	fmt.Println("  1) Claude Code / Pi — Anthropic API (default)")
-	fmt.Println("  2) Claude Code — Vertex AI")
-	fmt.Println("  3) Codex / OpenCode / Pi — ChatGPT login")
-	fmt.Println("  4) Codex / OpenCode / Pi — OpenAI API key")
-	fmt.Println("  5) Other — paste an upstream base URL")
-
-	var up string
-	switch ask("Choice [1]: ") {
-	case "2":
-		up = vertexUpstream(ask("Vertex region, e.g. us-east5 (blank = global): "))
-	case "3":
-		up = "https://chatgpt.com/backend-api/codex"
-	case "4":
-		up = "https://api.openai.com/v1"
-	case "5":
-		if up = ask("Upstream base URL: "); up == "" {
-			up = "https://api.anthropic.com"
-		}
-	default:
-		up = "https://api.anthropic.com"
-	}
+	up := chooseUpstream(ask)
 
 	if interactive {
 		if err := writeEnvFile(envFile, map[string]string{"UPSTREAM": up}); err != nil {
@@ -192,7 +221,18 @@ func launchLines(cfg config) []string {
 			piLaunchLine("anthropic", base),
 		}
 	}
-	return []string{"OpenCode/Pi: set the selected provider's base URL to " + base}
+	// Anything else is a gateway: LiteLLM, another company proxy, an aggregator.
+	// One base URL there serves every dialect it was configured for, and
+	// TokenTracer records whichever one the client speaks — so print a line per
+	// client rather than guessing which of them this upstream was chosen for.
+	// Claude Code needs the token spelled out: pointed at a gateway it sends
+	// ANTHROPIC_AUTH_TOKEN as a bearer, which is the gateway's key, not a
+	// vendor's.
+	return []string{
+		"Claude Code: ANTHROPIC_BASE_URL=" + base + " ANTHROPIC_AUTH_TOKEN=<gateway key> claude",
+		fmt.Sprintf(`Codex: codex -c 'openai_base_url="%s"'`, base),
+		"OpenCode/Pi: set the selected provider's base URL to " + base,
+	}
 }
 
 func piLaunchLine(provider, base string) string {
