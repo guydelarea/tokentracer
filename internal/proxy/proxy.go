@@ -9,12 +9,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/guydelarea/tokentracer/internal/record"
+	"github.com/guydelarea/tokentracer/internal/upstream"
 	"github.com/guydelarea/tokentracer/internal/wire"
 )
 
@@ -30,23 +30,38 @@ const (
 	copyChunk = 32 << 10
 )
 
-// Proxy forwards every request to the upstream API and hands the recordable
-// ones to a Sink. It is the only component on the client path.
+// Proxy forwards every request to the upstream API it belongs to and hands the
+// recordable ones to a Sink. It is the only component on the client path.
+//
+// "The upstream it belongs to" is the whole of the multi-client story: the
+// routes come from config, and the table decides per request, so one port can
+// front Claude Code on Anthropic and OpenCode on OpenAI at the same time.
 type Proxy struct {
-	upstream *url.URL
-	client   *http.Client
-	upgrade  http.Handler
-	sockets  *webSocketRegistry
-	sink     record.Sink
+	routes  *upstream.Table
+	client  *http.Client
+	upgrade http.Handler
+	sockets *webSocketRegistry
+	sink    record.Sink
 }
 
-func New(upstream string, sink record.Sink) (*Proxy, error) {
-	u, err := url.Parse(upstream)
+// New builds a proxy over a single upstream — the original one-client shape,
+// kept because most setups are still exactly that.
+func New(base string, sink record.Sink) (*Proxy, error) {
+	routes, err := upstream.Parse(base)
 	if err != nil {
-		return nil, fmt.Errorf("proxy: bad upstream %q: %w", upstream, err)
+		return nil, fmt.Errorf("proxy: bad upstream %q: %w", base, err)
 	}
-	if u.Scheme == "" || u.Host == "" {
-		return nil, fmt.Errorf("proxy: upstream %q needs a scheme and host", upstream)
+	t, err := upstream.New(routes)
+	if err != nil {
+		return nil, fmt.Errorf("proxy: %w", err)
+	}
+	return NewRouted(t, sink)
+}
+
+// NewRouted builds a proxy over a route table.
+func NewRouted(routes *upstream.Table, sink record.Sink) (*Proxy, error) {
+	if routes == nil || routes.Len() == 0 {
+		return nil, fmt.Errorf("proxy: no upstreams configured")
 	}
 
 	tr := http.DefaultTransport.(*http.Transport).Clone()
@@ -55,9 +70,14 @@ func New(upstream string, sink record.Sink) (*Proxy, error) {
 	tr.DisableCompression = true
 
 	sockets := newWebSocketRegistry()
-	p := &Proxy{upstream: u, client: &http.Client{Transport: tr}, sockets: sockets, sink: sink}
+	p := &Proxy{routes: routes, client: &http.Client{Transport: tr}, sockets: sockets, sink: sink}
 	p.upgrade = &httputil.ReverseProxy{
 		Director: func(r *http.Request) {
+			// ServeHTTP already resolved the route and put it in the context, so the
+			// upgrade path and the ordinary path can never disagree about where a
+			// request went — which matters, because the recorder stamps the row from
+			// that same context value.
+			u := routeOf(r.Context()).URL
 			path, rawPath := p.upstreamPaths(r)
 			r.URL.Scheme = u.Scheme
 			r.URL.Host = u.Host
@@ -83,6 +103,9 @@ func New(upstream string, sink record.Sink) (*Proxy, error) {
 func (p *Proxy) Close() { p.sockets.Close() }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	route := p.route(r)
+	r = r.WithContext(context.WithValue(r.Context(), routeKey{}, route))
+
 	if websocketUpgrade(r.Header) {
 		ctx := context.WithValue(r.Context(), webSocketPathKey{}, r.URL.Path)
 		p.upgrade.ServeHTTP(w, r.WithContext(ctx))
@@ -109,7 +132,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	copyHeaders(out.Header, r.Header)
 	out.Header.Del("Accept-Encoding") // identity, so the tee sees parseable bytes
-	out.Host = p.upstream.Host
+	out.Host = route.URL.Host
 
 	resp, err := p.client.Do(out)
 	if err != nil {
@@ -174,6 +197,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Duration:      time.Since(start),
 		Method:        r.Method,
 		Path:          r.URL.Path,
+		Upstream:      route.Name,
 		Status:        resp.StatusCode,
 		Streamed:      strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream"),
 		ReqBody:       reqBody,
@@ -216,15 +240,49 @@ func recordable(r *http.Request) bool {
 // carries the client's bytes through byte-for-byte; Go ignores it when it agrees
 // with Path anyway, so the ordinary /v1/messages case is unaffected.
 func (p *Proxy) target(r *http.Request) string {
-	u := *p.upstream
+	u := *routeOf(r.Context()).URL
 	u.Path, u.RawPath = p.upstreamPaths(r)
 	u.RawQuery = r.URL.RawQuery
 	return u.String()
 }
 
 func (p *Proxy) upstreamPaths(r *http.Request) (path, rawPath string) {
-	return appendUpstreamPath(p.upstream.Path, r.URL.Path),
-		appendUpstreamPath(p.upstream.EscapedPath(), r.URL.EscapedPath())
+	base := routeOf(r.Context()).URL
+	return appendUpstreamPath(base.Path, r.URL.Path),
+		appendUpstreamPath(base.EscapedPath(), r.URL.EscapedPath())
+}
+
+// routeKey carries the resolved route from ServeHTTP to everything downstream:
+// the forwarder, the upgrade Director, and the row the recorder writes. Resolved
+// once, at the top, because a request that is *forwarded* to one upstream and
+// *recorded* against another would be worse than not recording it at all.
+type routeKey struct{}
+
+func routeOf(ctx context.Context) upstream.Route {
+	r, _ := ctx.Value(routeKey{}).(upstream.Route)
+	return r
+}
+
+// route picks the upstream for a request and strips the routing prefix from the
+// request's own path, so everything downstream — the forwarded path, the
+// recorded endpoint, the wire dialect the parser picks — sees the path the
+// client would have sent without TokenTracer in the way.
+//
+// Both Path and RawPath are trimmed by the same byte count. That is safe
+// because /tt/<name>/ is ASCII with nothing to escape, so the prefix is
+// byte-identical in the raw form; and it is necessary because RawPath is what
+// carries a Vertex model name through unmangled (see target).
+func (p *Proxy) route(r *http.Request) upstream.Route {
+	route, trimmed := p.routes.Resolve(r.URL.Path, r.Header)
+	if cut := len(r.URL.Path) - len(trimmed); cut > 0 {
+		if escaped := r.URL.EscapedPath(); len(escaped) > cut {
+			r.URL.RawPath = escaped[cut:]
+		} else {
+			r.URL.RawPath = ""
+		}
+		r.URL.Path = trimmed
+	}
+	return route
 }
 
 func appendUpstreamPath(basePath, requestPath string) string {

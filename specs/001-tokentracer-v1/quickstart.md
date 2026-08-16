@@ -27,8 +27,13 @@ OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"http://loc
 The setup choice is load-bearing even though the launch command is the same.
 ChatGPT OAuth must use the `chatgpt.com/backend-api/codex` upstream; an OpenAI
 API key must use `api.openai.com/v1`. Sending ChatGPT OAuth to the public API
-produces `401 Missing scopes: api.responses.write`. If `UPSTREAM` is set in the
-shell, it overrides the wizard's saved choice.
+produces `401 Missing scopes: api.responses.write`. If `UPSTREAMS` or `UPSTREAM`
+is set in the shell, it overrides the wizard's saved choice.
+
+Both can be configured at once — answer the wizard `4,5`, or set
+`UPSTREAMS='openai=https://api.openai.com/v1,codex=https://chatgpt.com/backend-api/codex'`.
+The launch command above then reaches the `openai` route, and the startup log
+prints the `/tt/codex` URL for the client on the other one.
 
 ## See it
 

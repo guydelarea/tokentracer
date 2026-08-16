@@ -45,6 +45,12 @@ type Row struct {
 	TsMs     int64  // unix ms, arrival
 	Endpoint string // "POST /v1/messages"
 
+	// Upstream is which configured route served this exchange — "anthropic",
+	// "openai", "codex", or whatever the user named a gateway. "" on every row
+	// recorded before TokenTracer could front more than one API, and on any row
+	// whose route the proxy could not name.
+	Upstream string // "" → NULL
+
 	SessionID   string // "" → NULL
 	ModelReq    string
 	ModelServed string // "" → NULL
@@ -131,6 +137,7 @@ type UsageRow struct {
 	// failure; ToolsBytes keys the toolset cache that reads the schemas themselves.
 	SessionID  string
 	ParentSid  string // the session that spawned this one; "" for top-level rows
+	Upstream   string // the route that served it; "" on rows recorded before routes existed
 	Status     int
 	Label      string
 	Op         string
@@ -217,6 +224,16 @@ CREATE TABLE captures (
 	// NULL on every pre-existing row and on every top-level session.
 	`ALTER TABLE requests ADD COLUMN parent_sid TEXT;
 	 CREATE INDEX idx_requests_parent ON requests(parent_sid);`,
+
+	// 6 — upstream: the configured route that served the exchange. One proxy can
+	// now front Claude Code on Anthropic and OpenCode on OpenAI at the same time,
+	// and with mixed traffic in one database "which API was this?" stops being
+	// answerable from the model name — an OpenAI-compatible gateway can serve a
+	// Claude model, and two providers can serve the same one. NULL on every
+	// pre-existing row, which reads as "before we tracked this", not as a
+	// provider.
+	`ALTER TABLE requests ADD COLUMN upstream TEXT;
+	 CREATE INDEX idx_requests_upstream ON requests(upstream);`,
 }
 
 // Open opens (creating if needed) the database at path, applies the pragmas
@@ -325,8 +342,8 @@ INSERT INTO requests (
 	input_tokens, output_tokens, cache_read_tokens, cache_w5m_tokens, cache_w1h_tokens,
 	turns, tool_count, max_tokens, total_bytes, tools_bytes, system_bytes, messages_bytes,
 	err_type, err_msg,
-	think_tokens, text_tokens, tool_tokens, prefix, parent_sid
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	think_tokens, text_tokens, tool_tokens, prefix, parent_sid, upstream
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // InsertExchange writes the fact row and, when there is a body worth keeping,
 // the capture — in one transaction. There is never a capture without facts.
@@ -352,7 +369,7 @@ func (s *Store) InsertExchange(r Row, reqBody, respBody []byte) (int64, error) {
 		r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheW5mTokens, r.CacheW1hTokens,
 		r.Turns, r.ToolCount, nullInt(r.MaxTokens), r.TotalBytes, r.ToolsBytes, r.SystemBytes, r.MessagesBytes,
 		nullStr(r.ErrType), nullStr(r.ErrMsg),
-		r.ThinkTokens, r.TextTokens, r.ToolTokens, nullStr(r.Prefix), nullStr(r.ParentSid),
+		r.ThinkTokens, r.TextTokens, r.ToolTokens, nullStr(r.Prefix), nullStr(r.ParentSid), nullStr(r.Upstream),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("store: insert request: %w", err)

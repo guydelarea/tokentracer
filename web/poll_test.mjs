@@ -264,3 +264,51 @@ try {
 } finally {
   globalThis.fetch = originalFetch;
 }
+
+// The provider filter and badge exist only when there is something to choose
+// between. With one upstream the whole apparatus stays off the page, which is
+// the state most installs are in.
+{
+  const src = (re, what) => {
+    const m = source.match(re);
+    assert.ok(m, what + ' must exist');
+    return m[0];
+  };
+  // The three helpers close over the module-scope D and S. Lift them into a
+  // factory that takes those as parameters, so the shipped bodies run verbatim
+  // against state this test controls.
+  const make = eval('(function (D, S) {' +
+    src(/function esc\(s\) \{[\s\S]*?\n\}/, 'esc') +
+    src(/function filteredSessions\(\) \{[\s\S]*?\n\}/, 'filteredSessions') +
+    src(/function upstreamFilter\(\) \{[\s\S]*?\n  return h \+ '<\/div>';\n\}/, 'upstreamFilter') +
+    src(/function upstreamBadge\(s\) \{[\s\S]*?\n\}/, 'upstreamBadge') +
+    'return { filteredSessions: filteredSessions, upstreamFilter: upstreamFilter, upstreamBadge: upstreamBadge };' +
+    '})');
+
+  const sessions = [
+    { id: 'a', upstream: 'anthropic' },
+    { id: 'b', upstream: 'openai' },
+    { id: 'c' } // recorded before the upstream column existed
+  ];
+
+  let U = make(
+    { port: 8787, upstreams: [{ name: 'anthropic', url: 'u', path: '' }], sessions: sessions },
+    { upstream: '' }
+  );
+  assert.equal(U.upstreamFilter(), '', 'one upstream must draw no filter');
+  assert.equal(U.upstreamBadge(sessions[0]), '', 'one upstream must draw no badge');
+
+  const two = [{ name: 'anthropic', url: 'u1', path: '' }, { name: 'openai', url: 'u2', path: '/tt/openai' }];
+  U = make({ port: 8787, upstreams: two, sessions: sessions }, { upstream: '' });
+  assert.match(U.upstreamFilter(), /data-upstream="openai"/, 'two upstreams must draw a chip each');
+  assert.match(U.upstreamFilter(), /chip on" data-upstream=""/, 'with no filter set, "all" is the lit chip');
+  assert.match(U.upstreamFilter(), /http:\/\/localhost:8787\/tt\/openai/, 'a route needing a prefix must say so');
+  assert.match(U.upstreamBadge(sessions[1]), /openai/, 'a routed session gets its badge');
+  assert.equal(U.upstreamBadge(sessions[2]), '', 'a session recorded before routing gets none');
+  assert.equal(U.filteredSessions().length, 3, 'no filter shows every session');
+
+  U = make({ port: 8787, upstreams: two, sessions: sessions }, { upstream: 'openai' });
+  assert.deepEqual(U.filteredSessions().map((s) => s.id), ['b'], 'a filter shows only that upstream');
+  assert.match(U.upstreamFilter(), /chip on" data-upstream="openai"/, 'the active chip is lit');
+  assert.match(U.upstreamFilter(), /chip off" data-upstream=""/, 'and "all" is not');
+}

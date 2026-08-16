@@ -123,6 +123,7 @@
  * @property {string} id
  * @property {string} label
  * @property {string} model
+ * @property {string} [upstream]    which configured API; absent on pre-routing rows
  * @property {boolean} live
  * @property {string} idle          "12s", "4m", "2h"
  * @property {string} last          RFC3339
@@ -167,6 +168,7 @@
  * @typedef {object} statsView
  * @property {number} port
  * @property {string} upstream
+ * @property {upstreamView[]} upstreams
  * @property {number} traced
  * @property {number} cost
  * @property {number} unpricedReqs
@@ -175,6 +177,14 @@
  * @property {overview} overview
  * @property {sessionRow[]} sessions
  * @property {storage} storage
+ */
+
+/** One configured upstream. `path` is the suffix a client points at to reach
+ * THIS one — '' when detection already routes there.
+ * @typedef {object} upstreamView
+ * @property {string} name
+ * @property {string} url
+ * @property {string} path
  */
 
 /** What the captures cost on disk, and the window that bounds them.
@@ -396,7 +406,7 @@ function zeroOverview() {
 
 /** @type {statsView} */
 var D = {
-  port: 0, upstream: '', traced: 0, cost: 0, unpricedReqs: 0, unpricedModels: [],
+  port: 0, upstream: '', upstreams: [], traced: 0, cost: 0, unpricedReqs: 0, unpricedModels: [],
   tokens: { in: 0, read: 0, write: 0, out: 0 },
   overview: zeroOverview(),
   sessions: [],
@@ -449,8 +459,10 @@ function sessionURL(sid) {
  * reset whenever a new request is opened. `xrow` is the same idea for the trace
  * list's unfolded rows, keyed by request id so it survives the 2s re-render.
  * `range` is the history screen's span in days; 365 is the one that means months.
- * @type {{sid: string|null, id: number|null, tab: string, toolsAll: boolean, cutAll: boolean, graph: boolean, open: Record<string, boolean|undefined>, rawSide: string, xrow: Record<number, boolean|undefined>, range: number}} */
-var S = { sid: sessionFromURL(), id: null, tab: 'request', toolsAll: false, cutAll: false, graph: false, open: {}, rawSide: 'request', xrow: {}, range: 7 };
+ * `upstream` is the provider filter on the sessions table; '' is everything,
+ * which is also the only value a single-upstream install can hold.
+ * @type {{sid: string|null, id: number|null, tab: string, toolsAll: boolean, cutAll: boolean, graph: boolean, open: Record<string, boolean|undefined>, rawSide: string, xrow: Record<number, boolean|undefined>, range: number, upstream: string}} */
+var S = { sid: sessionFromURL(), id: null, tab: 'request', toolsAll: false, cutAll: false, graph: false, open: {}, rawSide: 'request', xrow: {}, range: 7, upstream: '' };
 
 var PV = /** @type {Record<string, number|undefined>} */ ({}), PVT = /** @type {Record<string, number|undefined>} */ ({});
 /** @type {captureView|null} */
@@ -698,17 +710,22 @@ function sessionOf(sid) {
    The front page. A request is not a thing anyone did; a session is. */
 /** @returns {string} */
 function sessionTable() {
-  var R = D.sessions || [], i, day, lastDay = '';
+  var R = filteredSessions(), i, day, lastDay = '';
 
   var h = '<div style="margin-top:50px"><div class="hdrline">' +
     '<div class="cap">Sessions <span class="sub">· click one to trace it</span></div>' +
     '<div class="note">' + fC(D.traced) + ' requests traced · ' + fM(D.cost, 2) + ' total' +
     (D.unpricedReqs > 0 ? ' · ' + fC(D.unpricedReqs) + ' unpriced' : '') + '</div></div>' +
+    upstreamFilter() +
     '<div class="sgrid shead"><span></span><span>Session</span><span>Token mix</span>' +
     '<span class="r">Hit</span><span class="r">$/hr</span><span class="r">Spent</span><span class="r">Tokens</span>' +
     '<span class="r">Unused</span><span class="r">Req · Err</span><span class="r">Last</span></div>';
 
   if (!R.length) {
+    if (S.upstream) {
+      return h + '<div class="empty">Nothing from <span class="m">' + esc(S.upstream) +
+        '</span> yet. It is configured; no client has spoken to it.</div></div>';
+    }
     var at = D.port ? '<span class="m">ANTHROPIC_BASE_URL=http://localhost:' + esc(D.port) + '</span>' : 'this proxy';
     return h + '<div class="empty">No sessions yet. Point your client at ' + at + ' — the first one lands here within two seconds.</div></div>';
   }
@@ -722,6 +739,46 @@ function sessionTable() {
     h += sessionRowHtml(R[i]);
   }
   return h + '</div>';
+}
+
+/* ---------- the provider filter ----------
+   It exists only when there is something to choose between. With one upstream
+   every badge would read the same word and every filter would be a no-op, so
+   the whole apparatus stays out of the way — which is the state most installs
+   are in. */
+
+/** @returns {sessionRow[]} */
+function filteredSessions() {
+  var R = D.sessions || [];
+  if (!S.upstream) return R;
+  return R.filter(function (s) { return s.upstream === S.upstream; });
+}
+
+/** @returns {string} */
+function upstreamFilter() {
+  var U = D.upstreams || [];
+  if (U.length < 2) return '';
+
+  var h = '<div class="ufilter"><span class="ulab">upstream</span>' +
+    '<span class="chip ' + (S.upstream ? 'off' : 'on') + '" data-upstream="">all</span>';
+  for (var i = 0; i < U.length; i++) {
+    // The path is the answer to "how do I point a client here", and it is only
+    // interesting for the routes detection cannot reach on its own.
+    var hint = U[i].name + ' → ' + U[i].url +
+      (U[i].path ? '\nclients must use http://localhost:' + D.port + U[i].path : '');
+    h += '<span class="chip ' + (S.upstream === U[i].name ? 'on' : 'off') + '" data-upstream="' +
+      esc(U[i].name) + '" title="' + esc(hint) + '">' + esc(U[i].name) + '</span>';
+  }
+  return h + '</div>';
+}
+
+/** The badge on a session row. Only drawn when there is more than one upstream,
+ * and never for a row recorded before the column existed — a blank is honest,
+ * a guess is not.
+ * @param {sessionRow} s @returns {string} */
+function upstreamBadge(s) {
+  if ((D.upstreams || []).length < 2 || !s.upstream) return '';
+  return '<span class="ups">' + esc(s.upstream) + '</span>';
 }
 
 /** @param {string} last @returns {{key:string,label:string}} */
@@ -769,7 +826,7 @@ function sessionRowHtml(s) {
     '<span class="state"><span class="dot" style="background:' + dotC + ';animation:' + dotA + '"></span>' +
     '<span class="tx" style="color:' + stC + '">' + stTx + '</span></span>' +
     '<span style="display:flex;align-items:center;gap:8px;min-width:0">' +
-    '<span class="slabel" style="color:' + (s.live ? '#ececec' : '#a8a8a8') + '" title="' + esc(s.label) + '">' + esc(s.label) + '</span>' + agents + '</span>' +
+    '<span class="slabel" style="color:' + (s.live ? '#ececec' : '#a8a8a8') + '" title="' + esc(s.label) + '">' + esc(s.label) + '</span>' + upstreamBadge(s) + agents + '</span>' +
     mix(t.read || 0, t.in || 0, t.write || 0, t.out || 0) +
     '<span class="snum" style="color:#cfcfcf">' + (s.hit * 100).toFixed(0) + '%</span>' +
     '<span class="snum" style="color:#ececec">' + rate + '</span>' +
@@ -2408,6 +2465,15 @@ function wire() {
     };
   })(/** @type {string} */ (els[i].getAttribute('data-sid')));
 
+  // the provider filter → narrow the sessions table to one upstream
+  els = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-upstream]'));
+  for (i = 0; i < els.length; i++) els[i].onclick = (function (name) {
+    return function () {
+      S.upstream = name;
+      render();
+    };
+  })(/** @type {string} */ (els[i].getAttribute('data-upstream')));
+
   // the waste tile → the cut list of the session shipping the most of it
   var wo = document.querySelector('#wasteopen');
   if (wo) /** @type {HTMLElement} */ (wo).onclick = function () {
@@ -2528,8 +2594,19 @@ function poll() {
     D = j;
     D.overview = j.overview || zeroOverview();
     D.sessions = j.sessions || [];
-    var host = String(j.upstream || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-    $('#route').textContent = 'localhost:' + j.port + ' → ' + host;
+    D.upstreams = j.upstreams || [];
+    // One upstream reads as a host, the way it always has. Several read as the
+    // names they are known by — the host list would not fit, and the name is
+    // what the badges and the /tt/ prefixes use anyway.
+    var route = $('#route');
+    if (D.upstreams.length > 1) {
+      route.textContent = 'localhost:' + j.port + ' → ' + D.upstreams.map(function (u) { return u.name; }).join(' · ');
+      route.title = D.upstreams.map(function (u) { return u.name + ' → ' + u.url; }).join('\n');
+    } else {
+      route.textContent = 'localhost:' + j.port + ' → ' +
+        String(j.upstream || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+      route.title = '';
+    }
     $('#hdrstat').textContent = fC(j.traced) + ' traced · ' + fM(j.cost, 2) + ' total';
     var u = $('#unp'), n = j.unpricedReqs || 0, um = j.unpricedModels || [];
     // The models, not just the count: the badge is only actionable if it says

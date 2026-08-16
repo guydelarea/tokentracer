@@ -198,3 +198,48 @@ func TestSessionCostsSumToTheOverviewTotal(t *testing.T) {
 	}
 	close(t, "Σ session costs", sum, v.Cost)
 }
+
+// Which API a session talked to. A session is one client's conversation, so it
+// is one upstream — and the row says so.
+func TestSessionCarriesItsUpstream(t *testing.T) {
+	a := su("s1", 5, 100, 0, 0, 10)
+	a.Upstream = "anthropic"
+	b := su("s1", 4, 100, 0, 0, 10)
+	b.Upstream = "anthropic"
+
+	v := foldSessions([]store.UsageRow{a, b}, nil, testRates, now)
+	if len(v) != 1 || v[0].Upstream != "anthropic" {
+		t.Fatalf("session upstream = %+v", v)
+	}
+}
+
+// The bucket that collects every request whose client sent no session id can
+// hold two clients at once. Naming it after whichever spoke first would be a
+// badge that is simply wrong, so it gets none.
+func TestASessionSpanningUpstreamsClaimsNeither(t *testing.T) {
+	a := su("", 5, 100, 0, 0, 10)
+	a.Upstream = "anthropic"
+	b := su("", 4, 100, 0, 0, 10)
+	b.Upstream = "openai"
+
+	v := foldSessions([]store.UsageRow{a, b}, nil, testRates, now)
+	if len(v) != 1 {
+		t.Fatalf("sessions = %d, want the one no-id bucket", len(v))
+	}
+	if v[0].Upstream != "" {
+		t.Errorf("upstream = %q, want blank rather than a guess", v[0].Upstream)
+	}
+}
+
+// Rows recorded before the upstream column existed must not borrow a name from
+// the rows recorded after it, nor stop those rows from having one.
+func TestUnroutedRowsDoNotDisagree(t *testing.T) {
+	old := su("s1", 5, 100, 0, 0, 10) // no Upstream: recorded before routes
+	recent := su("s1", 4, 100, 0, 0, 10)
+	recent.Upstream = "openai"
+
+	v := foldSessions([]store.UsageRow{old, recent}, nil, testRates, now)
+	if len(v) != 1 || v[0].Upstream != "openai" {
+		t.Errorf("session upstream = %+v, want the route it is on now", v)
+	}
+}

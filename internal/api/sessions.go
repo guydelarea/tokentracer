@@ -52,6 +52,12 @@ type sessionRow struct {
 	Label string `json:"label"` // what was asked first — the session's name
 	Model string `json:"model"`
 
+	// Upstream is which configured API this session talked to. A session is one
+	// client's conversation, so it is one upstream — unless a subagent folded in
+	// from another, which cannot happen today and would show as the parent's.
+	// Empty on sessions recorded before routes existed.
+	Upstream string `json:"upstream,omitempty"`
+
 	Live bool   `json:"live"`
 	Idle string `json:"idle"` // "12s", "4m", "2h" — how long it has been quiet
 	Last string `json:"last"`
@@ -97,6 +103,7 @@ type toolset struct {
 // sessionAgg accumulates one session across the lifetime scan.
 type sessionAgg struct {
 	id, label, model string
+	upstream         string
 	first, last      time.Time
 	req, err         int
 	tok              tokens
@@ -107,6 +114,36 @@ type sessionAgg struct {
 	winReqs          int
 	parent           string // the session that spawned this one, "" for top-level
 	agents           int    // subagent sessions folded into this row
+}
+
+// notedUpstream records which API this session's requests went to, and refuses
+// to answer once they disagree.
+//
+// A real session is one client's conversation and so is one upstream. The
+// exception is the synthetic bucket that collects every request whose client
+// sent no session id at all: that one can hold two clients at once, and naming
+// it after whichever spoke first would be a badge that is simply wrong. Blank
+// draws nothing, which is the honest answer.
+func (a *sessionAgg) notedUpstream(name string) {
+	switch {
+	case name == "", a.upstream == mixedUpstream:
+		return // an unrouted row tells us nothing; a mixed verdict is final
+	case a.upstream == "":
+		a.upstream = name
+	case a.upstream != name:
+		a.upstream = mixedUpstream
+	}
+}
+
+// mixedUpstream is the sentinel for "more than one", cleared before it reaches
+// the wire — the page shows no badge rather than a made-up one.
+const mixedUpstream = "\x00mixed"
+
+func namedUpstream(s string) string {
+	if s == mixedUpstream {
+		return ""
+	}
+	return s
 }
 
 // foldSessions folds the lifetime scan into the sessions table, newest activity
@@ -144,6 +181,7 @@ func foldSessions(lifetime []store.UsageRow, tools map[string]toolset, rates []b
 		a.last = at
 		a.req++
 		a.model = billedModel(u.ModelReq, u.ModelServed)
+		a.notedUpstream(u.Upstream)
 		if n := calledTool(u.Op); n != "" {
 			a.called[n] = true
 		}
@@ -198,6 +236,7 @@ func foldSessions(lifetime []store.UsageRow, tools map[string]toolset, rates []b
 		}
 		p, c := agg[root], agg[sid]
 		p.agents++
+		p.notedUpstream(c.upstream)
 		p.req += c.req
 		p.err += c.err
 		p.cost += c.cost
@@ -228,7 +267,7 @@ func foldSessions(lifetime []store.UsageRow, tools map[string]toolset, rates []b
 		idle := now.Sub(a.last)
 
 		s := sessionRow{
-			ID: a.id, Label: label, Model: a.model,
+			ID: a.id, Label: label, Model: a.model, Upstream: namedUpstream(a.upstream),
 			Live: idle < liveWindow, Idle: humanSince(idle),
 			Last: a.last.Format(time.RFC3339),
 			Req:  a.req, Err: a.err,
