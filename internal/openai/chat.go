@@ -296,10 +296,26 @@ type ChatUsage struct {
 	CompletionTokens int64 `json:"completion_tokens"`
 	PromptDetails    struct {
 		CachedTokens int64 `json:"cached_tokens"`
+
+		// Cache writes exist in this dialect only when a gateway put them there:
+		// OpenAI's own Chat Completions never writes a cache explicitly and
+		// reports neither key. LiteLLM fronting a Claude model reports both
+		// spellings and keeps them in sync, so either one is the whole answer.
+		CacheWriteTokens    int64 `json:"cache_write_tokens"`
+		CacheCreationTokens int64 `json:"cache_creation_tokens"`
 	} `json:"prompt_tokens_details"`
 	CompletionDetails struct {
 		ReasoningTokens int64 `json:"reasoning_tokens"`
 	} `json:"completion_tokens_details"`
+}
+
+// CacheWrite is the cache-creation tokens this usage reports, under whichever
+// of the two names the gateway chose.
+func (u ChatUsage) CacheWrite() int64 {
+	if u.PromptDetails.CacheWriteTokens > 0 {
+		return u.PromptDetails.CacheWriteTokens
+	}
+	return u.PromptDetails.CacheCreationTokens
 }
 
 // ChatResponseFacts is the response projection used by the recorder.
@@ -310,6 +326,7 @@ type ChatResponseFacts struct {
 	Input      int64
 	Output     int64
 	CacheRead  int64
+	CacheWrite int64
 	Think      int64
 	Text       int64
 	Tool       int64
@@ -365,7 +382,8 @@ func DecodeChatSSE(body []byte) (ChatResponse, ChatResponseFacts, []byte, error)
 		if event.Error != nil {
 			response.Error = event.Error
 		}
-		if event.Usage.PromptTokens != 0 || event.Usage.CompletionTokens != 0 || event.Usage.PromptDetails.CachedTokens != 0 {
+		if event.Usage.PromptTokens != 0 || event.Usage.CompletionTokens != 0 ||
+			event.Usage.PromptDetails.CachedTokens != 0 || event.Usage.CacheWrite() != 0 {
 			response.Usage = event.Usage
 		}
 		for _, incoming := range event.Choices {
@@ -453,7 +471,12 @@ func appendChatText(old, next json.RawMessage) json.RawMessage {
 
 func chatFactsOf(response ChatResponse) ChatResponseFacts {
 	read := response.Usage.PromptDetails.CachedTokens
-	fresh := response.Usage.PromptTokens - read
+	write := response.Usage.CacheWrite()
+	// prompt_tokens is the whole input in this dialect — cached reads are counted
+	// in it and subtracted back out here, and a gateway reporting writes counts
+	// those in it the same way. Leaving them in would bill the written prefix
+	// twice: once fresh and once at the write multiplier.
+	fresh := response.Usage.PromptTokens - read - write
 	if fresh < 0 {
 		fresh = 0
 	}
@@ -463,6 +486,7 @@ func chatFactsOf(response ChatResponse) ChatResponseFacts {
 		Input:      fresh,
 		Output:     response.Usage.CompletionTokens,
 		CacheRead:  read,
+		CacheWrite: write,
 		Think:      min(response.Usage.CompletionDetails.ReasoningTokens, response.Usage.CompletionTokens),
 		Spawned:    chatAgentPrompts(response),
 	}

@@ -60,15 +60,22 @@ On first run it asks one question — which client you use — and saves the ans
 tokentracer: first-run setup — which client?
   1) Claude Code / Pi — Anthropic API (default)
   2) Claude Code — Vertex AI
-  3) Codex / OpenCode / Pi — ChatGPT login
-  4) Codex / OpenCode / Pi — OpenAI API key
-  5) Other — paste an upstream base URL
+  3) Claude Code — LiteLLM or another gateway speaking the Anthropic API
+  4) Codex / OpenCode / Pi — ChatGPT login
+  5) Codex / OpenCode / Pi — OpenAI API key
+  6) Other — paste an upstream base URL
 ```
 
 Pick 2 for **Vertex AI** and it asks for your region (blank = global), pointing the proxy at the right Google endpoint. Auth (your `gcloud` ADC token) passes through untouched. Re-run the wizard anytime with `go run ./cmd/tokentracer setup`; a set `UPSTREAM` env var always outranks the saved answer, and non-interactive runs (pipes, CI) skip the wizard and use the defaults.
 
-Pick 3 for the existing ChatGPT OAuth login used by Codex, OpenCode, or Pi, or
-4 when the client authenticates with an OpenAI API key. TokenTracer never reads
+Pick 3 for **[LiteLLM](https://docs.litellm.ai/)** and it asks for the gateway's
+base URL (blank = `http://localhost:4000`). The proxy then sits between Claude
+Code and the gateway, and the gateway keeps doing its own routing — TokenTracer
+records what Claude Code sent and what came back, whichever model LiteLLM chose
+to serve it with.
+
+Pick 4 for the existing ChatGPT OAuth login used by Codex, OpenCode, or Pi, or
+5 when the client authenticates with an OpenAI API key. TokenTracer never reads
 or stores that credential; the client's `Authorization` header passes through.
 Pick 1 for anything speaking the Anthropic API — Claude Code, Pi, and
 OpenCode's `anthropic` provider alike.
@@ -81,6 +88,12 @@ ANTHROPIC_BASE_URL=http://localhost:8787 claude
 
 # Vertex AI
 CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=http://localhost:8787 claude
+
+# LiteLLM (or any gateway serving the Anthropic Messages API)
+# The token is the gateway's key, and ANTHROPIC_MODEL names a model it serves.
+ANTHROPIC_BASE_URL=http://localhost:8787 \
+  ANTHROPIC_AUTH_TOKEN="$LITELLM_KEY" \
+  ANTHROPIC_MODEL=claude-sonnet-5 claude
 
 # Codex (ChatGPT login or OpenAI API)
 codex -c 'openai_base_url="http://localhost:8787"'
@@ -115,7 +128,8 @@ prefer. It saves no client configuration and reads no credentials.
 
 1. Run the setup wizard and pick the option matching how your client
    authenticates — *ChatGPT login* or *OpenAI API key* for Codex, OpenCode and
-   Pi on OpenAI; *Anthropic API* for Claude Code, OpenCode and Pi on Anthropic:
+   Pi on OpenAI; *Anthropic API* for Claude Code, OpenCode and Pi on Anthropic;
+   *LiteLLM* for Claude Code pointed at a gateway:
 
    ```bash
    go run ./cmd/tokentracer setup
@@ -174,6 +188,8 @@ A model with no entry in the rate table is reported as **unpriced** — a badge 
 
 The bill follows the model that **served** the request, not the one that was asked for. Those differ more often than you would think, and the difference is money.
 
+Behind a gateway, that name is the gateway's to choose. A route-prefixed one — `anthropic/claude-sonnet-5`, `bedrock/us.anthropic.claude-opus-4-5-v1:0` — prices off the same row as the bare model, because rate keys match on substring. An alias of your own invention (`fast-model`) is **unpriced** until `internal/billing/rates.go` has a row for it, which is the honest answer rather than a neighbour's price. And where a gateway rebuilds usage into a single flat `cache_creation_input_tokens` total instead of Anthropic's per-TTL split, the total bills as a 5-minute write — the only TTL a client gets without asking for the 1-hour beta, and the only reading that does not silently value the write at zero.
+
 Rates live in `internal/billing/rates.go`, seeded from [LiteLLM's price registry](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) and updated from the vendors' published model pages. GPT-5.6 Sol, Terra and Luna use [OpenAI's published standard and long-context rates](https://developers.openai.com/api/docs/pricing#text-tokens). Cache reads bill at 0.1x input and cache writes at 1.25x; Anthropic 1-hour writes bill at 2x.
 
 > [!NOTE]
@@ -181,12 +197,13 @@ Rates live in `internal/billing/rates.go`, seeded from [LiteLLM's price registry
 
 ### Supported clients
 
-TokenTracer records the **Anthropic Messages API** (`POST /v1/messages`, streaming and not), the **OpenAI Responses API** (`POST /responses` or `/v1/responses`), and **OpenAI-compatible Chat Completions** (`POST .../chat/completions`). It also understands Anthropic's **Vertex AI** spelling (`.../publishers/anthropic/models/<model>:streamRawPredict` and `:rawPredict`, where the model rides in the URL). Existing authentication headers pass through unchanged.
+TokenTracer records the **Anthropic Messages API** (`POST .../messages`, streaming and not), the **OpenAI Responses API** (`POST /responses` or `/v1/responses`), and **OpenAI-compatible Chat Completions** (`POST .../chat/completions`). It also understands Anthropic's **Vertex AI** spelling (`.../publishers/anthropic/models/<model>:streamRawPredict` and `:rawPredict`, where the model rides in the URL). All three match on the path suffix, so a gateway that mounts them under a route prefix — LiteLLM's `/anthropic/v1/messages` passthrough, an Azure deployment path — is recorded the same as the vendor's own. Existing authentication headers pass through unchanged.
 
 | Client | Status | Connection |
 | --- | --- | --- |
 | [Claude Code](https://claude.com/claude-code) | Tested | `ANTHROPIC_BASE_URL=http://localhost:8787` |
 | Claude Code via Vertex AI | Should work | Pick *Vertex AI* in the setup wizard, then `CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=http://localhost:8787` |
+| Claude Code via [LiteLLM](https://docs.litellm.ai/) | Supported | Pick *LiteLLM* in the setup wizard and give it the gateway's base URL, then `ANTHROPIC_BASE_URL=http://localhost:8787 ANTHROPIC_AUTH_TOKEN=$LITELLM_KEY claude`. Name the model with `ANTHROPIC_MODEL` if the gateway's model names are not Anthropic's. |
 | Anthropic Messages API client | Should work | Set its base URL to `http://localhost:8787` |
 | [Codex](https://developers.openai.com/codex) | Tested (WebSocket and HTTPS) | Pick *ChatGPT login* or *OpenAI API key*, then `codex -c 'openai_base_url="http://localhost:8787"'` |
 | [OpenCode](https://opencode.ai) | Tested with ChatGPT login; Anthropic and OpenAI-compatible providers supported | Pick the matching setup option, then override that provider's [`baseURL`](https://opencode.ai/docs/providers) with `OPENCODE_CONFIG_CONTENT` — `openai` for Responses, `anthropic` for Messages. For a compatible non-OpenAI provider, point its own `baseURL` at the proxy after selecting *Other* in setup. |

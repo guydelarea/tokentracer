@@ -339,6 +339,13 @@ func TestSeedTablePricesRealModelNames(t *testing.T) {
 		"claude-sonnet-4-5-20250929",
 		"anthropic.claude-sonnet-4-5",
 		"claude-3-7-sonnet-20250219",
+		// A gateway routes by prefixing the provider onto the model name. Keys
+		// match on substring, so the route rides along without a row of its own —
+		// pinned here because a LiteLLM session's whole bill depends on it.
+		"anthropic/claude-sonnet-5",
+		"litellm_proxy/claude-opus-4-5",
+		"openrouter/anthropic/claude-haiku-4-5",
+		"bedrock/us.anthropic.claude-opus-4-5-v1:0",
 		// The launch-gap models. Every one of these was UNPRICED in the dashboard
 		// until its row was added by hand, which is the failure this test pins.
 		"claude-opus-5",

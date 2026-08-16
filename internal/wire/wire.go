@@ -85,7 +85,11 @@ func Recordable(method, path string) bool {
 }
 
 func KindForPath(path string) Kind {
-	if path == "/v1/messages" {
+	// LiteLLM and other Anthropic-compatible gateways mount the Messages API
+	// under a route prefix — /anthropic/v1/messages is LiteLLM's passthrough — so
+	// match the suffix the way the OpenAI dialects below already do. count_tokens
+	// still falls through: its path ends in /count_tokens, not /messages.
+	if strings.HasSuffix(strings.TrimSuffix(path, "/"), "/messages") {
 		return Anthropic
 	}
 	if model := anthropic.VertexModel(path); model != "" && model != "count-tokens" {
@@ -243,7 +247,8 @@ func ObserveResponse(path string, status int, streamed bool, body []byte) Observ
 		obs.Response = ResponseFacts{
 			Model: responseFacts.Model, StopReason: responseFacts.StopReason, Op: responseFacts.Op,
 			Input: responseFacts.Input, Output: responseFacts.Output, CacheRead: responseFacts.CacheRead,
-			Think: responseFacts.Think, Text: responseFacts.Text, Tool: responseFacts.Tool,
+			CacheW5m: responseFacts.CacheWrite,
+			Think:    responseFacts.Think, Text: responseFacts.Text, Tool: responseFacts.Tool,
 			Spawned: responseFacts.Spawned,
 		}
 		if responseFacts.ErrType != "" {

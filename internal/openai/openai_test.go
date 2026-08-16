@@ -244,6 +244,42 @@ func TestDecodeError(t *testing.T) {
 	}
 }
 
+// A gateway fronting a cache-writing model reports the write in the Chat
+// Completions dialect that has no place for one. prompt_tokens carries the whole
+// input, so both cache components come back out of the fresh figure.
+func TestChatCacheWriteFromGatewayUsage(t *testing.T) {
+	for name, details := range map[string]string{
+		"openai spelling":    `{"cached_tokens":60,"cache_write_tokens":20}`,
+		"anthropic spelling": `{"cached_tokens":60,"cache_creation_tokens":20}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := []byte(`{"id":"chat_1","object":"chat.completion","model":"claude-sonnet-5",
+			  "choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],
+			  "usage":{"prompt_tokens":100,"prompt_tokens_details":` + details + `,"completion_tokens":30}}`)
+			_, facts, err := DecodeChatJSON(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if facts.Input != 20 || facts.CacheRead != 60 || facts.CacheWrite != 20 || facts.Output != 30 {
+				t.Errorf("usage = in %d / read %d / write %d / out %d, want 20/60/20/30",
+					facts.Input, facts.CacheRead, facts.CacheWrite, facts.Output)
+			}
+		})
+	}
+
+	// OpenAI's own responses carry neither key, and nothing about them changes.
+	body := []byte(`{"id":"chat_2","object":"chat.completion","model":"gpt-5.6",
+	  "choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],
+	  "usage":{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":60},"completion_tokens":30}}`)
+	_, facts, err := DecodeChatJSON(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if facts.Input != 40 || facts.CacheWrite != 0 {
+		t.Errorf("usage = in %d / write %d, want 40/0", facts.Input, facts.CacheWrite)
+	}
+}
+
 func TestMalformedBodies(t *testing.T) {
 	if _, err := ParseRequest([]byte(`{"input":`)); err == nil {
 		t.Error("malformed request accepted")

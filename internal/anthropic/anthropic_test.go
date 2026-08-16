@@ -592,6 +592,68 @@ func TestDecodeJSON(t *testing.T) {
 	}
 }
 
+// A gateway that rebuilds the response — LiteLLM does for every model it
+// translates — reports cache creation as one flat total and never sends the
+// per-TTL split. Reading only the split billed those writes as zero.
+func TestDecodeCacheCreationTotalWithoutSplit(t *testing.T) {
+	t.Run("json", func(t *testing.T) {
+		body := []byte(`{
+		  "id": "msg_gw",
+		  "type": "message",
+		  "role": "assistant",
+		  "model": "claude-sonnet-5",
+		  "stop_reason": "end_turn",
+		  "content": [{"type": "text", "text": "hi"}],
+		  "usage": {
+		    "input_tokens": 11,
+		    "output_tokens": 22,
+		    "cache_read_input_tokens": 33,
+		    "cache_creation_input_tokens": 44
+		  }
+		}`)
+		r, err := DecodeJSON(body)
+		if err != nil {
+			t.Fatalf("DecodeJSON: %v", err)
+		}
+		want := Usage{In: 11, Out: 22, CacheRead: 33, W5m: 44}
+		if r.Usage != want {
+			t.Errorf("Usage = %+v, want %+v", r.Usage, want)
+		}
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		body := []byte("data: " +
+			`{"type":"message_start","message":{"id":"msg_gw","role":"assistant","model":"claude-sonnet-5","usage":{"input_tokens":11,"output_tokens":1,"cache_read_input_tokens":33,"cache_creation_input_tokens":44}}}` + "\n\n" +
+			"data: " +
+			`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":22}}` + "\n\n")
+		r, err := DecodeSSE(body)
+		if err != nil {
+			t.Fatalf("DecodeSSE: %v", err)
+		}
+		want := Usage{In: 11, Out: 22, CacheRead: 33, W5m: 44}
+		if r.Usage != want {
+			t.Errorf("Usage = %+v, want %+v", r.Usage, want)
+		}
+	})
+
+	// Anthropic sends both, and the total is W5m+W1h. The split has to win, or a
+	// 1-hour write would land on the 5-minute rate and bill at 1.25x instead of 2x.
+	t.Run("the split wins wherever both are sent", func(t *testing.T) {
+		body := []byte("data: " +
+			`{"type":"message_start","message":{"id":"msg_1","role":"assistant","model":"claude-sonnet-5","usage":{"input_tokens":11,"output_tokens":1,"cache_creation_input_tokens":99,"cache_creation":{"ephemeral_5m_input_tokens":44,"ephemeral_1h_input_tokens":55}}}}` + "\n\n" +
+			"data: " +
+			`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":22,"cache_creation_input_tokens":99}}` + "\n\n")
+		r, err := DecodeSSE(body)
+		if err != nil {
+			t.Fatalf("DecodeSSE: %v", err)
+		}
+		want := Usage{In: 11, Out: 22, W5m: 44, W1h: 55}
+		if r.Usage != want {
+			t.Errorf("Usage = %+v, want %+v", r.Usage, want)
+		}
+	})
+}
+
 func TestDecodeError(t *testing.T) {
 	t.Run("structured error body", func(t *testing.T) {
 		typ, msg := DecodeError(429, []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Number of requests has exceeded your limit."}}`))
