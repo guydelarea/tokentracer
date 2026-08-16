@@ -3,8 +3,12 @@
 ## Run
 
 ```sh
-go run ./cmd/tokentracer        # defaults: PORT=8787, UPSTREAM=https://api.anthropic.com, ./tokentracer.db
+go run ./cmd/tokentracer
 ```
+
+On first run, choose the option matching the client's authentication. For
+Codex, OpenCode, or Pi, choose 4 for ChatGPT login/OAuth and 5 only for an
+OpenAI API key. The startup log prints the matching client command.
 
 ## Point Claude Code at it
 
@@ -13,6 +17,18 @@ ANTHROPIC_BASE_URL=http://localhost:8787 claude
 ```
 
 Run a short task that uses a tool.
+
+## Point OpenCode at it
+
+```sh
+OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode
+```
+
+The setup choice is load-bearing even though the launch command is the same.
+ChatGPT OAuth must use the `chatgpt.com/backend-api/codex` upstream; an OpenAI
+API key must use `api.openai.com/v1`. Sending ChatGPT OAuth to the public API
+produces `401 Missing scopes: api.responses.write`. If `UPSTREAM` is set in the
+shell, it overrides the wizard's saved choice.
 
 ## See it
 

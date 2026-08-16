@@ -57,10 +57,14 @@ func TestLaunchLines(t *testing.T) {
 		if len(lines) != 3 {
 			t.Fatalf("OpenAI launch lines = %q", lines)
 		}
-		if lines[0] != `Codex: codex -c 'openai_base_url="http://localhost:8787"'` {
+		auth := "OpenAI API key"
+		if provider == "openai-codex" {
+			auth = "ChatGPT login/OAuth"
+		}
+		if lines[0] != `Codex (`+auth+`): codex -c 'openai_base_url="http://localhost:8787"'` {
 			t.Errorf("Codex launch line = %q", lines[0])
 		}
-		if lines[1] != `OpenCode: OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode` {
+		if lines[1] != `OpenCode (`+auth+`): OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode` {
 			t.Errorf("OpenCode launch line = %q", lines[1])
 		}
 		wantPi := `Pi: set ~/.pi/agent/models.json providers.` + provider + `.baseUrl="http://localhost:8787", then run pi --provider ` + provider
@@ -76,6 +80,21 @@ func TestLaunchLines(t *testing.T) {
 		gateway[1] != `Codex: codex -c 'openai_base_url="http://localhost:8787"'` ||
 		gateway[2] != "OpenCode/Pi: set the selected provider's base URL to http://localhost:8787" {
 		t.Errorf("gateway launch lines = %q", gateway)
+	}
+}
+
+func TestAuthNotice(t *testing.T) {
+	cases := map[string]string{
+		"https://chatgpt.com/backend-api/codex":  "ChatGPT login/OAuth required; do not use an OpenAI API key",
+		"https://api.openai.com/v1":              `OpenAI API key required; ChatGPT OAuth will fail with "Missing scopes: api.responses.write"`,
+		"https://API.OPENAI.COM/v1":              `OpenAI API key required; ChatGPT OAuth will fail with "Missing scopes: api.responses.write"`,
+		"https://api.anthropic.com":              "",
+		"https://gateway.example/api.openai.com": "",
+	}
+	for upstream, want := range cases {
+		if got := authNotice(upstream); got != want {
+			t.Errorf("authNotice(%q) = %q, want %q", upstream, got, want)
+		}
 	}
 }
 
