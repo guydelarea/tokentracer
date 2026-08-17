@@ -271,6 +271,15 @@ func runSetup() {
 	os.Setenv("UPSTREAMS", spec)
 }
 
+// shellOnlyUpstream reports that the shell — not .env — is carrying the legacy
+// single-upstream key, and nothing newer. UPSTREAMS outranks UPSTREAM
+// everywhere else, but a shell-set variable outranks the file, and both rules
+// meet only here: an `UPSTREAM=… tokentracer` in front of an install whose .env
+// holds a saved list is a deliberate one-off override, not a stale key.
+func shellOnlyUpstream() bool {
+	return os.Getenv("UPSTREAM") != "" && os.Getenv("UPSTREAMS") == ""
+}
+
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -559,7 +568,13 @@ func main() {
 	// A saved .env counts as configured; the shell env outranks it. The wizard
 	// runs on an explicit `setup`, or on first run — when nothing configured the
 	// upstream and there is a terminal to ask on (pipes and CI get the default).
+	shellUpstream := shellOnlyUpstream()
 	loadEnvFile(envFile)
+	if shellUpstream {
+		// A saved UPSTREAMS would otherwise outrank it, and the shell is the one
+		// place the user is unambiguously overriding the saved answer right now.
+		os.Unsetenv("UPSTREAMS")
+	}
 	if len(os.Args) > 1 && os.Args[1] == "setup" {
 		runSetup()
 	} else if os.Getenv("UPSTREAMS") == "" && os.Getenv("UPSTREAM") == "" && stdinIsTTY() {

@@ -11,7 +11,9 @@ Configuration comes from environment variables or `KEY=value` lines in
 | `UPSTREAM` | `https://api.anthropic.com` | single upstream base URL, honoured when `UPSTREAMS` is unset; use `https://chatgpt.com/backend-api/codex` for ChatGPT OAuth and `https://api.openai.com/v1` only for an OpenAI API key |
 | `TOKENTRACER_DB` | `./tokentracer.db` | SQLite database path (created on first run) |
 
-`UPSTREAMS` outranks `UPSTREAM`. With several configured, a request is routed by
+`UPSTREAMS` outranks `UPSTREAM`, except when `UPSTREAM` is set in the shell and
+the list only comes from `.env` — a shell-set variable always wins. With several
+upstreams configured, a request is routed by
 the wire dialect in its path (`/v1/messages` → Anthropic, `/chat/completions`
 and `/responses` → OpenAI), and `/tt/<name>/…` forces a named route when two
 upstreams speak the same dialect. A route's name declares its dialect when the

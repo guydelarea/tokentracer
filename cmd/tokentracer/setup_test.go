@@ -77,6 +77,35 @@ func TestLoadConfigPrefersUpstreams(t *testing.T) {
 	}
 }
 
+// …but a shell-set UPSTREAM still outranks a saved UPSTREAMS, because a
+// variable exported in front of the command is a deliberate override of the
+// wizard's answer, and the docs promise the shell wins over .env.
+func TestShellUpstreamOutranksASavedList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := writeEnvFile(path, map[string]string{"UPSTREAMS": "openai=https://api.openai.com/v1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("UPSTREAMS", "")
+	os.Unsetenv("UPSTREAMS")
+	t.Setenv("UPSTREAM", "https://api.anthropic.com")
+
+	// the same three steps main() takes, in the same order
+	shellUpstream := shellOnlyUpstream()
+	loadEnvFile(path)
+	if shellUpstream {
+		os.Unsetenv("UPSTREAMS")
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Routes) != 1 || cfg.Upstream() != "https://api.anthropic.com" {
+		t.Errorf("routes = %+v, want the shell's single upstream", cfg.Routes)
+	}
+}
+
 func TestLoadConfigRejectsAMalformedList(t *testing.T) {
 	t.Setenv("UPSTREAMS", "openai=")
 	if _, err := loadConfig(); err == nil {
