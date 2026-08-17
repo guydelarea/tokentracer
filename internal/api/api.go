@@ -22,8 +22,27 @@ import (
 
 // Config is what the dashboard needs to know about the process it is watching.
 type Config struct {
-	Port     int
+	Port int
+
+	// Upstream is the first route's base URL. It is what the header has always
+	// shown, and it stays because a one-upstream install is still the common one.
 	Upstream string
+
+	// Upstreams is every configured route. With one entry the page says nothing
+	// new; with several it is what lets a row say which API it went to, and what
+	// the provider filter is built from.
+	Upstreams []UpstreamView
+}
+
+// UpstreamView is one configured route as the dashboard sees it.
+type UpstreamView struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+
+	// Path is the URL a client points at to reach THIS upstream: the bare proxy
+	// URL when detection already routes here, the /tt/<name> form when it does
+	// not. The page shows it so the setup instructions live where the traffic is.
+	Path string `json:"path"`
 }
 
 type server struct {

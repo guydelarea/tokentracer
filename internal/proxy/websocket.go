@@ -32,7 +32,11 @@ func (t *webSocketTransport) RoundTrip(r *http.Request) (*http.Response, error) 
 		return resp, nil
 	}
 
-	observer := &webSocketObserver{sink: t.sink, path: clientPath(r.URL.Path, r.Context().Value(webSocketPathKey{}))}
+	observer := &webSocketObserver{
+		sink:     t.sink,
+		path:     clientPath(r.URL.Path, r.Context().Value(webSocketPathKey{})),
+		upstream: routeOf(r.Context()).Name,
+	}
 	connObserver := &observedWebSocket{
 		ReadWriteCloser: conn,
 		fromServer:      webSocketFrameDecoder{onMessage: observer.serverMessage},
@@ -148,10 +152,11 @@ func (r *webSocketRegistry) Close() {
 }
 
 type webSocketObserver struct {
-	mu     sync.Mutex
-	sink   record.Sink
-	path   string
-	active *webSocketExchange
+	mu       sync.Mutex
+	sink     record.Sink
+	path     string
+	upstream string // the route this socket was forwarded to
+	active   *webSocketExchange
 }
 
 type webSocketExchange struct {
@@ -220,6 +225,7 @@ func (o *webSocketObserver) finishLocked(now time.Time, aborted bool) *record.Ex
 		Duration:      now.Sub(active.start),
 		Method:        "WS",
 		Path:          o.path,
+		Upstream:      o.upstream,
 		Status:        http.StatusSwitchingProtocols,
 		Streamed:      true,
 		ReqBody:       active.request,

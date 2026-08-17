@@ -17,8 +17,14 @@ const timelineMin = 60
 // statsView is the /api/stats contract. These json tags ARE the wire format —
 // there is no translation layer, so the two cannot drift.
 type statsView struct {
-	Port         int      `json:"port"`
-	Upstream     string   `json:"upstream"`
+	Port     int    `json:"port"`
+	Upstream string `json:"upstream"`
+
+	// Upstreams is the configured route table. The page uses it to decide whether
+	// there is a provider story to tell at all: one entry and the columns stay
+	// hidden, because a provider badge that always reads the same word is noise.
+	Upstreams []UpstreamView `json:"upstreams"`
+
 	Traced       int      `json:"traced"`
 	Cost         float64  `json:"cost"`
 	UnpricedReqs int      `json:"unpricedReqs"`
@@ -113,7 +119,12 @@ type recentRow struct {
 	// simply never reached the wire.
 	Label string `json:"label"`
 
-	Model   string    `json:"model"`
+	Model string `json:"model"`
+
+	// Upstream is which configured API served it. Empty on rows recorded before
+	// routes existed, and the page draws nothing rather than guessing.
+	Upstream string `json:"upstream,omitempty"`
+
 	Sid     string    `json:"sid"`
 	Op      string    `json:"op"`
 	Status  int       `json:"status"`
@@ -176,9 +187,10 @@ type shape struct {
 // cache anyway.
 func fold(lifetime []store.UsageRow, window []store.Row, tools map[string]toolset, rates []billing.Rate, now time.Time, cfg Config) statsView {
 	v := statsView{
-		Port:     cfg.Port,
-		Upstream: cfg.Upstream,
-		Traced:   len(lifetime),
+		Port:      cfg.Port,
+		Upstream:  cfg.Upstream,
+		Upstreams: cfg.Upstreams,
+		Traced:    len(lifetime),
 		Overview: overview{
 			WindowMin: windowMin,
 			Timeline:  make([]bucket, timelineMin),
@@ -339,21 +351,22 @@ func rowView(r store.Row, rates []billing.Rate) recentRow {
 	bill := billing.Compute(rates, model, u, at)
 
 	return recentRow{
-		ID:      r.ID,
-		Time:    at.Format(time.RFC3339),
-		Label:   r.Label,
-		Model:   model,
-		Sid:     r.SessionID,
-		Op:      r.Op,
-		Status:  r.Status,
-		Ms:      r.DurationMs,
-		Ttft:    r.TtftMs,
-		Stop:    r.StopReason,
-		Aborted: r.Aborted,
-		Tok:     tokens{In: u.In, Read: u.Read, Write: u.Write5m + u.Write1h, Out: u.Out},
-		Cost:    costs{In: bill.In, Read: bill.Read, Write: bill.Write, Out: bill.Out},
-		Priced:  bill.Priced,
-		Shape:   shape{Think: r.ThinkTokens, Text: r.TextTokens, Tool: r.ToolTokens},
+		ID:       r.ID,
+		Time:     at.Format(time.RFC3339),
+		Label:    r.Label,
+		Model:    model,
+		Upstream: r.Upstream,
+		Sid:      r.SessionID,
+		Op:       r.Op,
+		Status:   r.Status,
+		Ms:       r.DurationMs,
+		Ttft:     r.TtftMs,
+		Stop:     r.StopReason,
+		Aborted:  r.Aborted,
+		Tok:      tokens{In: u.In, Read: u.Read, Write: u.Write5m + u.Write1h, Out: u.Out},
+		Cost:     costs{In: bill.In, Read: bill.Read, Write: bill.Write, Out: bill.Out},
+		Priced:   bill.Priced,
+		Shape:    shape{Think: r.ThinkTokens, Text: r.TextTokens, Tool: r.ToolTokens},
 		Bytes: byteSplit{
 			Total:    r.TotalBytes,
 			Tools:    r.ToolsBytes,

@@ -22,6 +22,8 @@ import (
 	"github.com/guydelarea/tokentracer/internal/proxy"
 	"github.com/guydelarea/tokentracer/internal/record"
 	"github.com/guydelarea/tokentracer/internal/store"
+	"github.com/guydelarea/tokentracer/internal/upstream"
+	"github.com/guydelarea/tokentracer/internal/wire"
 )
 
 // shutdownGrace bounds the whole shutdown: in-flight streams, the proxy's 30s
@@ -41,17 +43,40 @@ const banner = `
 `
 
 type config struct {
-	Port     string
-	Upstream string
-	DBPath   string
+	Port   string
+	Routes []upstream.Route
+	DBPath string
 }
 
-func loadConfig() config {
-	return config{
-		Port:     env("PORT", "8787"),
-		Upstream: env("UPSTREAM", "https://api.anthropic.com"),
-		DBPath:   env("TOKENTRACER_DB", "./tokentracer.db"),
+// Upstream is the first route's base URL — what a single-upstream install has
+// always called "the upstream", and what the dashboard header shows when there
+// is only one.
+func (c config) Upstream() string {
+	if len(c.Routes) == 0 {
+		return ""
 	}
+	return c.Routes[0].Base()
+}
+
+// loadConfig reads the routing config, newest key first. UPSTREAMS carries a
+// list of name=url pairs; UPSTREAM carries the single value TokenTracer shipped
+// with, and is still what a one-client install writes. A malformed list is fatal
+// rather than silently narrowed: half a route table would send some client's
+// traffic somewhere the user never named.
+func loadConfig() (config, error) {
+	spec := env("UPSTREAMS", "")
+	if spec == "" {
+		spec = env("UPSTREAM", "https://api.anthropic.com")
+	}
+	routes, err := upstream.Parse(spec)
+	if err != nil {
+		return config{}, err
+	}
+	return config{
+		Port:   env("PORT", "8787"),
+		Routes: upstream.Dedupe(routes),
+		DBPath: env("TOKENTRACER_DB", "./tokentracer.db"),
+	}, nil
 }
 
 // envFile is where the setup wizard saves its answer, next to the DB in cwd.
@@ -113,11 +138,16 @@ func vertexUpstream(region string) string {
 // liteLLMDefault is where a LiteLLM proxy listens out of the box.
 const liteLLMDefault = "http://localhost:4000"
 
-// chooseUpstream runs the wizard's questions through ask and returns the
-// upstream the answer implies. The upstream is the only fact the proxy needs —
-// the launch line is derived from it, so no client name is stored.
-func chooseUpstream(ask func(prompt string) string) string {
-	fmt.Println("tokentracer: first-run setup — which client?")
+// chooseUpstreams runs the wizard's questions through ask and returns the
+// upstreams the answers imply, in the order they were chosen. Order is not
+// cosmetic: when two upstreams could serve the same request, the earlier one
+// wins, so the first answer is the default for its dialect.
+//
+// The answer is a list because one proxy now fronts as many APIs as the user
+// runs clients — "1,5" is Claude Code on Anthropic and OpenCode on OpenAI in
+// the same dashboard.
+func chooseUpstreams(ask func(prompt string) string) []upstream.Route {
+	fmt.Println("tokentracer: first-run setup — which clients? (comma-separated, e.g. 1,5)")
 	fmt.Println("  1) Claude Code / Pi — Anthropic API (default)")
 	fmt.Println("  2) Claude Code — Vertex AI")
 	fmt.Println("  3) Claude Code — LiteLLM or another gateway speaking the Anthropic API")
@@ -125,26 +155,76 @@ func chooseUpstream(ask func(prompt string) string) string {
 	fmt.Println("  5) Codex / OpenCode / Pi — OpenAI API key (api.openai.com; not ChatGPT OAuth)")
 	fmt.Println("  6) Other — paste an upstream base URL")
 
-	switch ask("Choice [1]: ") {
+	answer := ask("Choice [1]: ")
+
+	var routes []upstream.Route
+	for _, choice := range splitChoices(answer) {
+		base, name := upstreamFor(choice, ask)
+		if base == "" {
+			continue
+		}
+		routes = append(routes, namedRoute(base, name))
+	}
+	if len(routes) == 0 {
+		routes = append(routes, namedRoute("https://api.anthropic.com", ""))
+	}
+	return upstream.Dedupe(routes)
+}
+
+// splitChoices reads "1,5" or "1 5" or "1" the same way. An empty answer is one
+// empty choice, which upstreamFor turns into the default — the behaviour of
+// pressing enter, unchanged.
+func splitChoices(answer string) []string {
+	fields := strings.FieldsFunc(answer, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t'
+	})
+	if len(fields) == 0 {
+		return []string{""}
+	}
+	return fields
+}
+
+// upstreamFor turns one menu choice into a base URL, asking the follow-up that
+// choice needs. It also returns the route's name where the MENU knows the
+// dialect but the URL cannot show it: option 3 is a gateway that speaks the
+// Messages API, and calling that route "anthropic" is how the router learns
+// what http://localhost:4000 is. "" means "name it after its host".
+func upstreamFor(choice string, ask func(prompt string) string) (base, name string) {
+	switch choice {
 	case "2":
-		return vertexUpstream(ask("Vertex region, e.g. us-east5 (blank = global): "))
+		return vertexUpstream(ask("Vertex region, e.g. us-east5 (blank = global): ")), ""
 	case "3":
 		if up := gatewayUpstream(ask("LiteLLM base URL [" + liteLLMDefault + "]: ")); up != "" {
-			return up
+			return up, "anthropic"
 		}
-		return liteLLMDefault
+		return liteLLMDefault, "anthropic"
 	case "4":
-		return "https://chatgpt.com/backend-api/codex"
+		return "https://chatgpt.com/backend-api/codex", ""
 	case "5":
-		return "https://api.openai.com/v1"
+		return "https://api.openai.com/v1", ""
 	case "6":
 		if up := gatewayUpstream(ask("Upstream base URL: ")); up != "" {
-			return up
+			return up, ""
 		}
-		return "https://api.anthropic.com"
+		return "https://api.anthropic.com", ""
 	default:
-		return "https://api.anthropic.com"
+		return "https://api.anthropic.com", ""
 	}
+}
+
+// namedRoute gives a base URL the short name it is known by — on the dashboard,
+// in the launch lines, and in the /tt/<name>/ prefix. An empty name falls back
+// to what the URL implies.
+func namedRoute(base, name string) upstream.Route {
+	routes, err := upstream.Parse(base)
+	if err != nil || len(routes) == 0 {
+		return upstream.Route{}
+	}
+	r := routes[0]
+	if name != "" {
+		r.Name = name
+	}
+	return r
 }
 
 // gatewayUpstream normalizes a pasted base URL: a bare host:port gets the http
@@ -177,16 +257,27 @@ func runSetup() {
 		return strings.TrimSpace(s)
 	}
 
-	up := chooseUpstream(ask)
+	spec := upstream.Format(chooseUpstreams(ask))
 
 	if interactive {
-		if err := writeEnvFile(envFile, map[string]string{"UPSTREAM": up}); err != nil {
+		if err := writeEnvFile(envFile, map[string]string{"UPSTREAMS": spec}); err != nil {
 			fmt.Fprintf(os.Stderr, "tokentracer: could not write %s: %v\n", envFile, err)
 		} else {
 			fmt.Printf("tokentracer: saved %s — re-run `go run ./cmd/tokentracer setup` to change it\n", envFile)
 		}
 	}
-	os.Setenv("UPSTREAM", up)
+	// UPSTREAMS outranks whatever UPSTREAM a previous setup left behind, so the
+	// answer just given is the one this process runs with.
+	os.Setenv("UPSTREAMS", spec)
+}
+
+// shellOnlyUpstream reports that the shell — not .env — is carrying the legacy
+// single-upstream key, and nothing newer. UPSTREAMS outranks UPSTREAM
+// everywhere else, but a shell-set variable outranks the file, and both rules
+// meet only here: an `UPSTREAM=… tokentracer` in front of an install whose .env
+// holds a saved list is a deliberate one-off override, not a stale key.
+func shellOnlyUpstream() bool {
+	return os.Getenv("UPSTREAM") != "" && os.Getenv("UPSTREAMS") == ""
 }
 
 func env(key, def string) string {
@@ -196,35 +287,92 @@ func env(key, def string) string {
 	return def
 }
 
-// launchLines are copy-paste commands that point clients at the proxy. The
-// upstream identifies the wire family; Codex and OpenCode use the same OpenAI
-// Responses endpoint but expose their base URL overrides differently.
+// launchLines are copy-paste commands that point clients at the proxy, one
+// block per configured upstream.
+//
+// Each block gets the URL that actually reaches its own upstream. A client whose
+// dialect already routes there uses the bare proxy URL and needs to know nothing
+// about routing; only a client that would collide with an earlier route — Codex
+// and OpenCode both speaking Responses to different hosts — gets the /tt/<name>/
+// prefix that settles it.
 func launchLines(cfg config) []string {
-	base := "http://localhost:" + cfg.Port
-	if strings.Contains(cfg.Upstream, "googleapis") {
-		return []string{"Claude Code: CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=" + base + " claude"}
+	table, err := upstream.New(cfg.Routes)
+	if err != nil {
+		return nil
 	}
-	if auth, provider, ok := openAIAuth(cfg.Upstream); ok {
-		return []string{
-			fmt.Sprintf(`Codex (%s): codex -c 'openai_base_url="%s"'`, auth, base),
-			fmt.Sprintf(`OpenCode (%s): OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"%s"}}}}' opencode`, auth, base),
-			piLaunchLine(provider, base),
+
+	var out []string
+	for _, r := range cfg.Routes {
+		base := "http://localhost:" + cfg.Port
+		if len(cfg.Routes) > 1 {
+			base += routeSuffix(table, r)
+		}
+		if len(cfg.Routes) > 1 {
+			out = append(out, "["+r.Name+" → "+r.Base()+"]")
+		}
+		out = append(out, clientLines(r, base)...)
+	}
+	return out
+}
+
+// routeSuffix is "" when this route is what detection would pick anyway, and
+// "/tt/<name>" when it is not. The check is per dialect the route can serve:
+// a route that is the default for none of them is only reachable by name.
+func routeSuffix(table *upstream.Table, r upstream.Route) string {
+	for _, k := range []wire.Kind{wire.Anthropic, wire.OpenAI, wire.OpenAIChat} {
+		if !r.Serves(k) {
+			continue
+		}
+		if def, ok := table.Default(k); ok && def.Name == r.Name {
+			return ""
 		}
 	}
-	if strings.Contains(cfg.Upstream, "api.anthropic.com") {
+	return upstream.Prefix + r.Name
+}
+
+// clientLines are the per-client commands for one upstream: what to set, given
+// the wire family that upstream speaks, pointed at the URL that reaches it.
+//
+// The vendor hosts are matched first because they fix both halves of the
+// answer — the dialect AND whether the key is a vendor's. A gateway fixes only
+// the first, and only if the route was named for it, so it still gets the
+// ANTHROPIC_AUTH_TOKEN reminder: pointed at a gateway, Claude Code sends that
+// token as a bearer, and it is the gateway's key, not Anthropic's.
+func clientLines(r upstream.Route, base string) []string {
+	upstreamURL := r.Base()
+	if strings.Contains(upstreamURL, "googleapis") {
+		return []string{"Claude Code: CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=" + base + " claude"}
+	}
+	if auth, provider, ok := openAIAuth(upstreamURL); ok {
+		return openAILines(auth, provider, base)
+	}
+	if strings.Contains(upstreamURL, "api.anthropic.com") {
 		return []string{
 			"Claude Code: ANTHROPIC_BASE_URL=" + base + " claude",
 			fmt.Sprintf(`OpenCode: OPENCODE_CONFIG_CONTENT='{"provider":{"anthropic":{"options":{"baseURL":"%s"}}}}' opencode`, base),
 			piLaunchLine("anthropic", base),
 		}
 	}
-	// Anything else is a gateway: LiteLLM, another company proxy, an aggregator.
-	// One base URL there serves every dialect it was configured for, and
-	// TokenTracer records whichever one the client speaks — so print a line per
-	// client rather than guessing which of them this upstream was chosen for.
-	// Claude Code needs the token spelled out: pointed at a gateway it sends
-	// ANTHROPIC_AUTH_TOKEN as a bearer, which is the gateway's key, not a
-	// vendor's.
+	// A gateway that was named for a dialect — "anthropic=http://localhost:4000"
+	// is how setup records LiteLLM on the Messages API — gets that dialect's
+	// clients and no others. Printing the OpenAI lines for it would be printing
+	// a 404.
+	switch r.Dialect() {
+	case "anthropic":
+		return []string{
+			"Claude Code: ANTHROPIC_BASE_URL=" + base + " ANTHROPIC_AUTH_TOKEN=<gateway key> claude",
+			fmt.Sprintf(`OpenCode: OPENCODE_CONFIG_CONTENT='{"provider":{"anthropic":{"options":{"baseURL":"%s"}}}}' opencode`, base),
+			piLaunchLine("anthropic", base),
+		}
+	case "openai", "codex":
+		// A gateway's credential is the gateway's, so there is no vendor auth to
+		// name — that distinction only exists between OpenAI's own two hosts.
+		return openAILines("", "openai", base)
+	}
+	// Anything else is a gateway that declared nothing: LiteLLM, another company
+	// proxy, an aggregator. One base URL there serves every dialect it was
+	// configured for, and TokenTracer records whichever one the client speaks —
+	// so print a line per client rather than guessing.
 	return []string{
 		"Claude Code: ANTHROPIC_BASE_URL=" + base + " ANTHROPIC_AUTH_TOKEN=<gateway key> claude",
 		fmt.Sprintf(`Codex: codex -c 'openai_base_url="%s"'`, base),
@@ -232,8 +380,25 @@ func launchLines(cfg config) []string {
 	}
 }
 
-func openAIAuth(upstream string) (auth, provider string, ok bool) {
-	u, err := url.Parse(upstream)
+// openAILines are the OpenAI-dialect clients pointed at one upstream. auth names
+// which credential that upstream takes, when the upstream is one of OpenAI's own
+// two hosts and the answer is therefore knowable — the hosts are not
+// interchangeable, and sending the wrong one fails with a message that does not
+// say so. A gateway takes its own key, so it passes "".
+func openAILines(auth, provider, base string) []string {
+	label := ""
+	if auth != "" {
+		label = " (" + auth + ")"
+	}
+	return []string{
+		fmt.Sprintf(`Codex%s: codex -c 'openai_base_url="%s"'`, label, base),
+		fmt.Sprintf(`OpenCode%s: OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"%s"}}}}' opencode`, label, base),
+		piLaunchLine(provider, base),
+	}
+}
+
+func openAIAuth(upstreamURL string) (auth, provider string, ok bool) {
+	u, err := url.Parse(upstreamURL)
 	if err != nil {
 		return "", "", false
 	}
@@ -247,8 +412,8 @@ func openAIAuth(upstream string) (auth, provider string, ok bool) {
 	}
 }
 
-func authNotice(upstream string) string {
-	_, provider, ok := openAIAuth(upstream)
+func authNotice(upstreamURL string) string {
+	_, provider, ok := openAIAuth(upstreamURL)
 	if !ok {
 		return ""
 	}
@@ -256,6 +421,43 @@ func authNotice(upstream string) string {
 		return "ChatGPT login/OAuth required; do not use an OpenAI API key"
 	}
 	return `OpenAI API key required; ChatGPT OAuth will fail with "Missing scopes: api.responses.write"`
+}
+
+// authNotices is the startup warning, once per upstream that has one. Named,
+// because with several configured "the upstream" no longer identifies which of
+// them the warning is about.
+func authNotices(routes []upstream.Route) []string {
+	var out []string
+	for _, r := range routes {
+		notice := authNotice(r.Base())
+		if notice == "" {
+			continue
+		}
+		if len(routes) > 1 {
+			notice = r.Name + " — " + notice
+		}
+		out = append(out, notice)
+	}
+	return out
+}
+
+// upstreamViews is the route table as the dashboard shows it, carrying the
+// same "bare URL or /tt/<name>" answer the launch lines print — so the page and
+// the startup log can never tell the user two different things.
+func upstreamViews(routes []upstream.Route) []api.UpstreamView {
+	table, err := upstream.New(routes)
+	if err != nil {
+		return nil
+	}
+	out := make([]api.UpstreamView, 0, len(routes))
+	for _, r := range routes {
+		suffix := ""
+		if len(routes) > 1 {
+			suffix = routeSuffix(table, r)
+		}
+		out = append(out, api.UpstreamView{Name: r.Name, URL: r.Base(), Path: suffix})
+	}
+	return out
 }
 
 func piLaunchLine(provider, base string) string {
@@ -310,14 +512,19 @@ func newApp(cfg config) (*app, error) {
 
 	rec := record.New(st)
 
-	p, err := proxy.New(cfg.Upstream, rec)
+	table, err := upstream.New(cfg.Routes)
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
+	p, err := proxy.NewRouted(table, rec)
 	if err != nil {
 		st.Close()
 		return nil, err
 	}
 
 	port, _ := strconv.Atoi(cfg.Port)
-	dash := api.Handler(st, api.Config{Port: port, Upstream: cfg.Upstream})
+	dash := api.Handler(st, api.Config{Port: port, Upstream: cfg.Upstream(), Upstreams: upstreamViews(cfg.Routes)})
 
 	// Everything that isn't ours belongs to the client's API call.
 	mux := http.NewServeMux()
@@ -361,14 +568,23 @@ func main() {
 	// A saved .env counts as configured; the shell env outranks it. The wizard
 	// runs on an explicit `setup`, or on first run — when nothing configured the
 	// upstream and there is a terminal to ask on (pipes and CI get the default).
+	shellUpstream := shellOnlyUpstream()
 	loadEnvFile(envFile)
+	if shellUpstream {
+		// A saved UPSTREAMS would otherwise outrank it, and the shell is the one
+		// place the user is unambiguously overriding the saved answer right now.
+		os.Unsetenv("UPSTREAMS")
+	}
 	if len(os.Args) > 1 && os.Args[1] == "setup" {
 		runSetup()
-	} else if os.Getenv("UPSTREAM") == "" && stdinIsTTY() {
+	} else if os.Getenv("UPSTREAMS") == "" && os.Getenv("UPSTREAM") == "" && stdinIsTTY() {
 		runSetup()
 	}
 
-	cfg := loadConfig()
+	cfg, err := loadConfig()
+	if err != nil {
+		log.Fatalf("tokentracer: %v", err)
+	}
 
 	a, err := newApp(cfg)
 	if err != nil {
@@ -384,8 +600,8 @@ func main() {
 	defer stop()
 
 	go func() {
-		log.Printf("tokentracer: http://%s → %s  (db: %s)", addr, cfg.Upstream, cfg.DBPath)
-		if notice := authNotice(cfg.Upstream); notice != "" {
+		log.Printf("tokentracer: http://%s → %s  (db: %s)", addr, upstream.Format(cfg.Routes), cfg.DBPath)
+		for _, notice := range authNotices(cfg.Routes) {
 			log.Printf("tokentracer: auth — %s", notice)
 		}
 		for _, line := range launchLines(cfg) {

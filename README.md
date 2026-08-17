@@ -54,10 +54,10 @@ cd tokentracer
 go run ./cmd/tokentracer
 ```
 
-On first run it asks one question — which client you use — and saves the answer to `./.env`:
+On first run it asks one question — which clients you use — and saves the answer to `./.env`:
 
 ```text
-tokentracer: first-run setup — which client?
+tokentracer: first-run setup — which clients? (comma-separated, e.g. 1,5)
   1) Claude Code / Pi — Anthropic API (default)
   2) Claude Code — Vertex AI
   3) Claude Code — LiteLLM or another gateway speaking the Anthropic API
@@ -66,7 +66,11 @@ tokentracer: first-run setup — which client?
   6) Other — paste an upstream base URL
 ```
 
-Pick 2 for **Vertex AI** and it asks for your region (blank = global), pointing the proxy at the right Google endpoint. Auth (your `gcloud` ADC token) passes through untouched. Re-run the wizard anytime with `go run ./cmd/tokentracer setup`; a set `UPSTREAM` env var always outranks the saved answer, and non-interactive runs (pipes, CI) skip the wizard and use the defaults.
+**Answer with as many as you run.** `1,5` puts Claude Code on Anthropic and
+OpenCode on OpenAI behind the same port, in the same dashboard — see
+[Several providers at once](#several-providers-at-once).
+
+Pick 2 for **Vertex AI** and it asks for your region (blank = global), pointing the proxy at the right Google endpoint. Auth (your `gcloud` ADC token) passes through untouched. Re-run the wizard anytime with `go run ./cmd/tokentracer setup`; a set `UPSTREAMS` env var always outranks the saved answer, and non-interactive runs (pipes, CI) skip the wizard and use the defaults.
 
 Pick 3 for **[LiteLLM](https://docs.litellm.ai/)** and it asks for the gateway's
 base URL (blank = `http://localhost:4000`). The proxy then sits between Claude
@@ -122,6 +126,61 @@ TokenTracer preserves the request path and headers, so the provider still
 receives its own authentication and wire format.
 
 Open [localhost:8787/dashboard](http://localhost:8787/dashboard) and work as usual. Rows land within two seconds.
+
+### Several providers at once
+
+One proxy can front every API you use. Answer the wizard with a list — `1,5` —
+or set the upstreams directly:
+
+```bash
+UPSTREAMS='anthropic=https://api.anthropic.com,openai=https://api.openai.com/v1' \
+  go run ./cmd/tokentracer
+```
+
+Each client then points at the same `http://localhost:8787` and lands on its own
+upstream, because the wire dialect is written into the request path:
+`/v1/messages` is Anthropic, `/chat/completions` and `/responses` are OpenAI.
+Claude Code and OpenCode need no extra configuration at all.
+
+```bash
+ANTHROPIC_BASE_URL=http://localhost:8787 claude                                   # → anthropic
+OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode  # → openai
+```
+
+**When two upstreams speak the same dialect**, the path cannot separate them —
+Codex on a ChatGPT login and OpenCode on an API key both send `/responses`.
+Add the collider to the list, and TokenTracer gives it a named route:
+
+```bash
+UPSTREAMS='anthropic=https://api.anthropic.com,openai=https://api.openai.com/v1,codex=https://chatgpt.com/backend-api/codex' \
+  go run ./cmd/tokentracer
+
+# the first route for a dialect answers the bare URL; the rest are addressed by name
+codex -c 'openai_base_url="http://localhost:8787/tt/codex"'
+```
+
+The startup log prints the right URL for every client of every configured
+upstream, so you never have to work out which need the `/tt/<name>` prefix.
+Order matters: the first upstream that can serve a dialect is the one the bare
+URL reaches.
+
+**Naming a gateway** tells the router what it speaks. `http://localhost:4000`
+announces nothing on its own, so call the route `anthropic` if LiteLLM is
+mounted on the Messages API, or `openai` if it serves the OpenAI ones:
+
+```bash
+UPSTREAMS='anthropic=http://localhost:4000,openai=https://api.openai.com/v1' go run ./cmd/tokentracer
+```
+
+A route named neither still takes everything the named routes did not claim,
+which is exactly how a single-upstream setup has always behaved.
+
+On the dashboard, each session shows the upstream it talked to, and a filter
+above the table narrows to one. Both appear only when more than one upstream is
+configured.
+
+The old single-value `UPSTREAM` still works and still means "send everything
+here".
 
 ### Verify your client
 
@@ -218,6 +277,7 @@ TokenTracer records the **Anthropic Messages API** (`POST .../messages`, streami
 | [OpenCode](https://opencode.ai) | Tested with ChatGPT login; Anthropic and OpenAI-compatible providers supported | Pick the matching setup option, then override that provider's [`baseURL`](https://opencode.ai/docs/providers) with `OPENCODE_CONFIG_CONTENT` — `openai` for Responses, `anthropic` for Messages. For a compatible non-OpenAI provider, point its own `baseURL` at the proxy after selecting *Other* in setup. |
 | [Pi](https://pi.dev) | Supported for Anthropic, ChatGPT login, OpenAI Responses, and OpenAI-compatible Chat Completions providers | Pick the matching setup option, then set `providers.<provider>.baseUrl` in `~/.pi/agent/models.json` to `http://localhost:8787` and run `pi --provider <provider>`. |
 | OpenAI Responses or Chat Completions client | Should work | Set its base URL to `http://localhost:8787` |
+| Several of the above at once | Supported | List every upstream — `UPSTREAMS='anthropic=…,openai=…'`, or a comma-separated answer in the wizard. Each client keeps its own base URL of `http://localhost:8787`; see [Several providers at once](#several-providers-at-once). |
 | Vendor-native OpenCode transports | Not yet | Direct Gemini, Bedrock, and other non-Anthropic/non-OpenAI wire protocols are proxied unchanged but not recorded. |
 
 Everything else on any other path is proxied through untouched and never recorded, including Anthropic `count_tokens`, Vertex's `count-tokens` pseudo-model, and Responses auxiliary endpoints such as `/responses/compact`.
@@ -360,6 +420,7 @@ Keep changes focused. Add a real test for non-trivial behavior — and prefer on
 - [x] OpenAI Responses parsing (Codex, OpenCode, Pi)
 - [x] OpenAI Chat Completions parsing (OpenCode/Pi-compatible providers and other compatible clients)
 - [x] Codex's persistent Responses WebSocket, recorded exchange by exchange
+- [x] Several upstreams behind one port, routed by wire dialect
 
 ### License
 

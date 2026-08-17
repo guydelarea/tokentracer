@@ -26,6 +26,12 @@ type Exchange struct {
 	Status   int
 	Streamed bool
 
+	// Upstream is the name of the route the proxy forwarded this to. With one
+	// upstream configured it is a constant; with several it is the only fact that
+	// says which API a row belongs to, and it cannot be re-derived later — two
+	// providers can serve the same model name through the same dialect.
+	Upstream string
+
 	ReqBody  []byte // verbatim client request body
 	RespBody []byte // upstream response bytes (SSE stream or JSON), as teed
 
@@ -148,6 +154,7 @@ func build(ex Exchange) (store.Row, []byte, linkInfo) {
 	row := store.Row{
 		TsMs:       ex.Start.UnixMilli(),
 		Endpoint:   ex.Method + " " + ex.Path,
+		Upstream:   ex.Upstream,
 		Status:     ex.Status,
 		Streamed:   ex.Streamed,
 		Aborted:    ex.ClientAborted,

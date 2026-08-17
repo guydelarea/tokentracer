@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/guydelarea/tokentracer/internal/store"
+	"github.com/guydelarea/tokentracer/internal/upstream"
 )
 
 // The whole stack, wired exactly as main() wires it: fixture request → proxy →
@@ -74,12 +75,23 @@ func fakeUpstream(t *testing.T, sse []byte) *httptest.Server {
 	return srv
 }
 
-func newTestApp(t *testing.T, upstream string) (*app, *httptest.Server) {
+// routesFor parses an UPSTREAMS spec the way loadConfig does, so a test builds
+// its route table through the same door the binary does.
+func routesFor(t *testing.T, spec string) []upstream.Route {
+	t.Helper()
+	routes, err := upstream.Parse(spec)
+	if err != nil {
+		t.Fatalf("routesFor(%q): %v", spec, err)
+	}
+	return upstream.Dedupe(routes)
+}
+
+func newTestApp(t *testing.T, base string) (*app, *httptest.Server) {
 	t.Helper()
 	a, err := newApp(config{
-		Port:     "8787",
-		Upstream: upstream,
-		DBPath:   filepath.Join(t.TempDir(), "e2e.db"),
+		Port:   "8787",
+		Routes: routesFor(t, base),
+		DBPath: filepath.Join(t.TempDir(), "e2e.db"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -335,6 +347,94 @@ func TestEndToEndOpenAIResponses(t *testing.T) {
 	}
 }
 
+// Two clients, two APIs, one port: Claude Code's Messages call and OpenCode's
+// Chat Completions call go through the same proxy, land on different upstreams,
+// and come back as two rows the dashboard can tell apart.
+func TestEndToEndTwoUpstreamsOnOnePort(t *testing.T) {
+	anthropicUp := fakeUpstream(t, replaySSE(t))
+
+	chatSSE := []byte("data: " +
+		`{"id":"chat_mixed","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}` + "\n\n" +
+		"data: [DONE]\n\n")
+	var openaiPath string
+	openaiUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		openaiPath = r.URL.Path
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write(chatSSE)
+	}))
+	t.Cleanup(openaiUp.Close)
+
+	// Two gateway-shaped URLs would each answer for every dialect, so the routes
+	// are named for what they stand in for and the test asserts on the names.
+	a, err := newApp(config{
+		Port:   "8787",
+		Routes: routesFor(t, "anthropic="+anthropicUp.URL+",openai="+openaiUp.URL+"/v1"),
+		DBPath: filepath.Join(t.TempDir(), "mixed.db"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := httptest.NewServer(a.handler)
+	t.Cleanup(func() {
+		front.Close()
+		a.close()
+	})
+
+	// Claude Code's call. Nothing about it names an upstream; the dialect does.
+	resp, err := http.Post(front.URL+"/v1/messages", "application/json", bytes.NewReader(fixtureRequest(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	// OpenCode's call, on the same port, in the same second.
+	chatReq := []byte(`{"model":"gpt-4o-mini","stream":true,"user":"opencode-mixed","messages":[{"role":"user","content":"hi"}]}`)
+	resp, err = http.Post(front.URL+"/chat/completions", "application/json", bytes.NewReader(chatReq))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	if openaiPath != "/v1/chat/completions" {
+		t.Errorf("OpenAI upstream saw %q, want the base path prepended to the client's", openaiPath)
+	}
+
+	a.recorder.Close()
+	rows, err := a.store.Recent(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want one per client", len(rows))
+	}
+	got := map[string]string{} // model → upstream
+	for _, r := range rows {
+		got[r.ModelReq] = r.Upstream
+	}
+	if got["claude-sonnet-5"] != "anthropic" {
+		t.Errorf("the Messages call was recorded against %q", got["claude-sonnet-5"])
+	}
+	if got["gpt-4o-mini"] != "openai" {
+		t.Errorf("the Chat Completions call was recorded against %q", got["gpt-4o-mini"])
+	}
+
+	// And the dashboard can tell them apart: the route table is on the payload,
+	// and each session says which of its entries it belongs to.
+	stats := getStats(t, front)
+	if len(stats.Upstreams) != 2 || stats.Upstreams[0].Name != "anthropic" || stats.Upstreams[1].Name != "openai" {
+		t.Errorf("stats.upstreams = %+v", stats.Upstreams)
+	}
+	bySession := map[string]string{}
+	for _, s := range stats.Sessions {
+		bySession[s.ID] = s.Upstream
+	}
+	if bySession["opencode-mixed"] != "openai" {
+		t.Errorf("session upstreams = %+v", bySession)
+	}
+}
+
 func TestEndToEndOpenAIChatCompletions(t *testing.T) {
 	sse := []byte("data: " +
 		`{"id":"chat_e2e","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"Running"}}]}` + "\n\n" +
@@ -530,7 +630,7 @@ func TestShutdownFlushesTheQueue(t *testing.T) {
 	up := fakeUpstream(t, replaySSE(t))
 
 	dbPath := filepath.Join(t.TempDir(), "shutdown.db")
-	a, err := newApp(config{Port: "8787", Upstream: up.URL, DBPath: dbPath})
+	a, err := newApp(config{Port: "8787", Routes: routesFor(t, up.URL), DBPath: dbPath})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -579,13 +679,19 @@ type statsResponse struct {
 	Traced       int     `json:"traced"`
 	Cost         float64 `json:"cost"`
 	UnpricedReqs int     `json:"unpricedReqs"`
-	Sessions     []struct {
-		ID     string  `json:"id"`
-		Label  string  `json:"label"`
-		Req    int     `json:"req"`
-		Cost   float64 `json:"cost"`
-		Priced bool    `json:"priced"`
-		Unused int     `json:"unused"`
+	Upstreams    []struct {
+		Name string `json:"name"`
+		URL  string `json:"url"`
+		Path string `json:"path"`
+	} `json:"upstreams"`
+	Sessions []struct {
+		ID       string  `json:"id"`
+		Label    string  `json:"label"`
+		Req      int     `json:"req"`
+		Cost     float64 `json:"cost"`
+		Priced   bool    `json:"priced"`
+		Unused   int     `json:"unused"`
+		Upstream string  `json:"upstream"`
 	} `json:"sessions"`
 }
 
