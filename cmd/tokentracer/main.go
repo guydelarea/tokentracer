@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -114,7 +116,7 @@ func writeEnvFile(path string, kv map[string]string) error {
 	}
 	sort.Strings(keys)
 	var b strings.Builder
-	b.WriteString("# tokentracer config — edit, or re-run `go run ./cmd/tokentracer setup`\n")
+	b.WriteString("# tokentracer config — edit, or re-run `" + setupHint() + "`\n")
 	for _, k := range keys {
 		fmt.Fprintf(&b, "%s=%s\n", k, kv[k])
 	}
@@ -263,7 +265,7 @@ func runSetup() {
 		if err := writeEnvFile(envFile, map[string]string{"UPSTREAMS": spec}); err != nil {
 			fmt.Fprintf(os.Stderr, "tokentracer: could not write %s: %v\n", envFile, err)
 		} else {
-			fmt.Printf("tokentracer: saved %s — re-run `go run ./cmd/tokentracer setup` to change it\n", envFile)
+			fmt.Printf("tokentracer: saved %s — re-run `%s` to change it\n", envFile, setupHint())
 		}
 	}
 	// UPSTREAMS outranks whatever UPSTREAM a previous setup left behind, so the
@@ -287,30 +289,53 @@ func env(key, def string) string {
 	return def
 }
 
-// launchLines are copy-paste commands that point clients at the proxy, one
-// block per configured upstream.
+// launchCmd is one copy-pasteable way to put a client behind the proxy: the
+// client's name, the command to run, and — when the command alone is not the
+// whole story — the note that completes it (which credential the upstream
+// takes, which config file to touch first).
+type launchCmd struct {
+	Client string
+	Note   string
+	Cmd    string // "" when the client is configured in a file, not launched with a flag
+}
+
+// launchBlock is the launch commands for one upstream. Label and Notice exist
+// only when they disambiguate: the label names the route when several share the
+// port, and the notice warns about the one thing a command cannot show — which
+// credential the upstream will actually accept.
+type launchBlock struct {
+	Label  string
+	Notice string
+	Cmds   []launchCmd
+}
+
+// launchBlocks are the copy-paste commands that point clients at the proxy,
+// one block per configured upstream.
 //
 // Each block gets the URL that actually reaches its own upstream. A client whose
 // dialect already routes there uses the bare proxy URL and needs to know nothing
 // about routing; only a client that would collide with an earlier route — Codex
 // and OpenCode both speaking Responses to different hosts — gets the /tt/<name>/
 // prefix that settles it.
-func launchLines(cfg config) []string {
+func launchBlocks(cfg config) []launchBlock {
 	table, err := upstream.New(cfg.Routes)
 	if err != nil {
 		return nil
 	}
 
-	var out []string
+	var out []launchBlock
 	for _, r := range cfg.Routes {
 		base := "http://localhost:" + cfg.Port
+		label := ""
 		if len(cfg.Routes) > 1 {
 			base += routeSuffix(table, r)
+			label = r.Name + " → " + r.Base()
 		}
-		if len(cfg.Routes) > 1 {
-			out = append(out, "["+r.Name+" → "+r.Base()+"]")
-		}
-		out = append(out, clientLines(r, base)...)
+		out = append(out, launchBlock{
+			Label:  label,
+			Notice: authNotice(r.Base()),
+			Cmds:   clientCmds(r, base),
+		})
 	}
 	return out
 }
@@ -330,7 +355,7 @@ func routeSuffix(table *upstream.Table, r upstream.Route) string {
 	return upstream.Prefix + r.Name
 }
 
-// clientLines are the per-client commands for one upstream: what to set, given
+// clientCmds are the per-client commands for one upstream: what to set, given
 // the wire family that upstream speaks, pointed at the URL that reaches it.
 //
 // The vendor hosts are matched first because they fix both halves of the
@@ -338,62 +363,74 @@ func routeSuffix(table *upstream.Table, r upstream.Route) string {
 // the first, and only if the route was named for it, so it still gets the
 // ANTHROPIC_AUTH_TOKEN reminder: pointed at a gateway, Claude Code sends that
 // token as a bearer, and it is the gateway's key, not Anthropic's.
-func clientLines(r upstream.Route, base string) []string {
+func clientCmds(r upstream.Route, base string) []launchCmd {
 	upstreamURL := r.Base()
 	if strings.Contains(upstreamURL, "googleapis") {
-		return []string{"Claude Code: CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=" + base + " claude"}
+		return []launchCmd{{Client: "Claude Code", Cmd: "CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=" + base + " claude"}}
 	}
 	if auth, provider, ok := openAIAuth(upstreamURL); ok {
-		return openAILines(auth, provider, base)
+		return openAICmds(auth, provider, base)
 	}
 	if strings.Contains(upstreamURL, "api.anthropic.com") {
-		return []string{
-			"Claude Code: ANTHROPIC_BASE_URL=" + base + " claude",
-			fmt.Sprintf(`OpenCode: OPENCODE_CONFIG_CONTENT='{"provider":{"anthropic":{"options":{"baseURL":"%s"}}}}' opencode`, base),
-			piLaunchLine("anthropic", base),
+		return []launchCmd{
+			{Client: "Claude Code", Cmd: "ANTHROPIC_BASE_URL=" + base + " claude"},
+			opencodeCmd("anthropic", "", base),
+			piCmd("anthropic", base),
 		}
 	}
 	// A gateway that was named for a dialect — "anthropic=http://localhost:4000"
 	// is how setup records LiteLLM on the Messages API — gets that dialect's
-	// clients and no others. Printing the OpenAI lines for it would be printing
-	// a 404.
+	// clients and no others. Printing the OpenAI commands for it would be
+	// printing a 404.
 	switch r.Dialect() {
 	case "anthropic":
-		return []string{
-			"Claude Code: ANTHROPIC_BASE_URL=" + base + " ANTHROPIC_AUTH_TOKEN=<gateway key> claude",
-			fmt.Sprintf(`OpenCode: OPENCODE_CONFIG_CONTENT='{"provider":{"anthropic":{"options":{"baseURL":"%s"}}}}' opencode`, base),
-			piLaunchLine("anthropic", base),
+		return []launchCmd{
+			{Client: "Claude Code", Note: "the token is the gateway's key", Cmd: "ANTHROPIC_BASE_URL=" + base + " ANTHROPIC_AUTH_TOKEN=<gateway key> claude"},
+			opencodeCmd("anthropic", "", base),
+			piCmd("anthropic", base),
 		}
 	case "openai", "codex":
 		// A gateway's credential is the gateway's, so there is no vendor auth to
 		// name — that distinction only exists between OpenAI's own two hosts.
-		return openAILines("", "openai", base)
+		return openAICmds("", "openai", base)
 	}
 	// Anything else is a gateway that declared nothing: LiteLLM, another company
 	// proxy, an aggregator. One base URL there serves every dialect it was
 	// configured for, and TokenTracer records whichever one the client speaks —
-	// so print a line per client rather than guessing.
-	return []string{
-		"Claude Code: ANTHROPIC_BASE_URL=" + base + " ANTHROPIC_AUTH_TOKEN=<gateway key> claude",
-		fmt.Sprintf(`Codex: codex -c 'openai_base_url="%s"'`, base),
-		"OpenCode/Pi: set the selected provider's base URL to " + base,
+	// so print a command per client rather than guessing.
+	return []launchCmd{
+		{Client: "Claude Code", Note: "the token is the gateway's key", Cmd: "ANTHROPIC_BASE_URL=" + base + " ANTHROPIC_AUTH_TOKEN=<gateway key> claude"},
+		{Client: "Codex", Cmd: `codex -c 'openai_base_url="` + base + `"'`},
+		{Client: "OpenCode / Pi", Note: "set the selected provider's base URL to " + base},
 	}
 }
 
-// openAILines are the OpenAI-dialect clients pointed at one upstream. auth names
+// openAICmds are the OpenAI-dialect clients pointed at one upstream. auth names
 // which credential that upstream takes, when the upstream is one of OpenAI's own
 // two hosts and the answer is therefore knowable — the hosts are not
 // interchangeable, and sending the wrong one fails with a message that does not
 // say so. A gateway takes its own key, so it passes "".
-func openAILines(auth, provider, base string) []string {
-	label := ""
-	if auth != "" {
-		label = " (" + auth + ")"
+func openAICmds(auth, provider, base string) []launchCmd {
+	return []launchCmd{
+		{Client: "Codex", Note: auth, Cmd: `codex -c 'openai_base_url="` + base + `"'`},
+		opencodeCmd("openai", auth, base),
+		piCmd(provider, base),
 	}
-	return []string{
-		fmt.Sprintf(`Codex%s: codex -c 'openai_base_url="%s"'`, label, base),
-		fmt.Sprintf(`OpenCode%s: OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"%s"}}}}' opencode`, label, base),
-		piLaunchLine(provider, base),
+}
+
+func opencodeCmd(provider, note, base string) launchCmd {
+	return launchCmd{
+		Client: "OpenCode",
+		Note:   note,
+		Cmd:    fmt.Sprintf(`OPENCODE_CONFIG_CONTENT='{"provider":{"%s":{"options":{"baseURL":"%s"}}}}' opencode`, provider, base),
+	}
+}
+
+func piCmd(provider, base string) launchCmd {
+	return launchCmd{
+		Client: "Pi",
+		Note:   fmt.Sprintf(`first set ~/.pi/agent/models.json providers.%s.baseUrl="%s"`, provider, base),
+		Cmd:    "pi --provider " + provider,
 	}
 }
 
@@ -423,22 +460,69 @@ func authNotice(upstreamURL string) string {
 	return `OpenAI API key required; ChatGPT OAuth will fail with "Missing scopes: api.responses.write"`
 }
 
-// authNotices is the startup warning, once per upstream that has one. Named,
-// because with several configured "the upstream" no longer identifies which of
-// them the warning is about.
-func authNotices(routes []upstream.Route) []string {
-	var out []string
-	for _, r := range routes {
-		notice := authNotice(r.Base())
-		if notice == "" {
-			continue
-		}
-		if len(routes) > 1 {
-			notice = r.Name + " — " + notice
-		}
-		out = append(out, notice)
+// setupHint is the command that re-runs the wizard, phrased for how this
+// process was actually started: `go run` builds into a go-build temp dir, an
+// installed binary answers to its own name.
+func setupHint() string {
+	if strings.Contains(os.Args[0], "go-build") {
+		return "go run ./cmd/tokentracer setup"
 	}
-	return out
+	return filepath.Base(os.Args[0]) + " setup"
+}
+
+// startupScreen is everything the user needs after the banner: where the proxy
+// and dashboard are, which config produced that answer, and the exact command
+// that launches each client through the proxy — ready to paste, not buried in
+// log lines.
+func startupScreen(cfg config, source string) string {
+	var b strings.Builder
+	base := "http://localhost:" + cfg.Port
+
+	// One route fits on the line; several are already itemized below, so the
+	// summary only says how many share the port.
+	target := cfg.Upstream()
+	if len(cfg.Routes) > 1 {
+		target = fmt.Sprintf("%d upstreams, routed by dialect (below)", len(cfg.Routes))
+	}
+	fmt.Fprintf(&b, "\n  Proxy      %s → %s\n", base, target)
+	fmt.Fprintf(&b, "  Dashboard  %s/dashboard\n", base)
+	fmt.Fprintf(&b, "  Database   %s\n", cfg.DBPath)
+	fmt.Fprintf(&b, "  Config     %s — change with `%s`\n", source, setupHint())
+
+	b.WriteString("\n  Ready. Launch your agent through the proxy — pick your client:\n")
+	for _, blk := range launchBlocks(cfg) {
+		if blk.Label != "" {
+			fmt.Fprintf(&b, "\n  ── %s\n", blk.Label)
+		}
+		if blk.Notice != "" {
+			fmt.Fprintf(&b, "\n  ⚠ %s\n", blk.Notice)
+		}
+		for _, c := range blk.Cmds {
+			header := "  " + c.Client
+			if c.Note != "" {
+				header += " — " + c.Note
+			}
+			b.WriteString("\n" + header + "\n")
+			if c.Cmd != "" {
+				b.WriteString("  $ " + c.Cmd + "\n")
+			}
+		}
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+// configSource names where the running config came from, for the startup
+// screen: the shell outranks .env, which outranks the built-in defaults —
+// the same precedence loadConfig applies, said out loud.
+func configSource(fromShell bool) string {
+	if fromShell {
+		return "shell environment (outranks " + envFile + ")"
+	}
+	if _, err := os.Stat(envFile); err == nil {
+		return envFile + " (applied)"
+	}
+	return "defaults (nothing saved yet)"
 }
 
 // upstreamViews is the route table as the dashboard shows it, carrying the
@@ -458,10 +542,6 @@ func upstreamViews(routes []upstream.Route) []api.UpstreamView {
 		out = append(out, api.UpstreamView{Name: r.Name, URL: r.Base(), Path: suffix})
 	}
 	return out
-}
-
-func piLaunchLine(provider, base string) string {
-	return fmt.Sprintf(`Pi: set ~/.pi/agent/models.json providers.%s.baseUrl="%s", then run pi --provider %s`, provider, base, provider)
 }
 
 // app is the wiring: store → recorder → proxy, plus the dashboard reading the
@@ -569,6 +649,7 @@ func main() {
 	// runs on an explicit `setup`, or on first run — when nothing configured the
 	// upstream and there is a terminal to ask on (pipes and CI get the default).
 	shellUpstream := shellOnlyUpstream()
+	fromShell := os.Getenv("UPSTREAMS") != "" || os.Getenv("UPSTREAM") != ""
 	loadEnvFile(envFile)
 	if shellUpstream {
 		// A saved UPSTREAMS would otherwise outrank it, and the shell is the one
@@ -594,21 +675,21 @@ func main() {
 	addr := "127.0.0.1:" + cfg.Port
 	srv := &http.Server{Addr: addr, Handler: a.handler}
 
-	// Catch the signal before ListenAndServe, so a Ctrl-C during startup still
-	// takes the clean path.
+	// Bind before printing the screen: "Ready" on a port something else owns
+	// would be the screen lying about the one thing it exists to say.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("tokentracer: %v", err)
+	}
+	fmt.Fprint(os.Stderr, startupScreen(cfg, configSource(fromShell)))
+
+	// Catch the signal before Serve, so a Ctrl-C during startup still takes the
+	// clean path.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	go func() {
-		log.Printf("tokentracer: http://%s → %s  (db: %s)", addr, upstream.Format(cfg.Routes), cfg.DBPath)
-		for _, notice := range authNotices(cfg.Routes) {
-			log.Printf("tokentracer: auth — %s", notice)
-		}
-		for _, line := range launchLines(cfg) {
-			log.Printf("tokentracer: point your client at it — %s", line)
-		}
-		log.Printf("tokentracer: dashboard — http://localhost:%s/dashboard", cfg.Port)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("tokentracer: %v", err)
 		}
 	}()

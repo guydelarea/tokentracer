@@ -113,71 +113,120 @@ func TestLoadConfigRejectsAMalformedList(t *testing.T) {
 	}
 }
 
-func TestLaunchLines(t *testing.T) {
-	anthropic := launchLines(config{Port: "8787", Routes: mustRoutes(t, "https://api.anthropic.com")})
+func TestLaunchBlocks(t *testing.T) {
+	blocks := launchBlocks(config{Port: "8787", Routes: mustRoutes(t, "https://api.anthropic.com")})
+	if len(blocks) != 1 || blocks[0].Label != "" || blocks[0].Notice != "" {
+		t.Fatalf("anthropic blocks = %+v, want one unlabelled block with no notice", blocks)
+	}
+	anthropic := blocks[0].Cmds
 	if len(anthropic) != 3 ||
-		anthropic[0] != "Claude Code: ANTHROPIC_BASE_URL=http://localhost:8787 claude" ||
-		anthropic[1] != `OpenCode: OPENCODE_CONFIG_CONTENT='{"provider":{"anthropic":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode` ||
-		anthropic[2] != `Pi: set ~/.pi/agent/models.json providers.anthropic.baseUrl="http://localhost:8787", then run pi --provider anthropic` {
-		t.Errorf("anthropic launch lines = %q", anthropic)
+		anthropic[0] != (launchCmd{Client: "Claude Code", Cmd: "ANTHROPIC_BASE_URL=http://localhost:8787 claude"}) ||
+		anthropic[1] != (launchCmd{Client: "OpenCode", Cmd: `OPENCODE_CONFIG_CONTENT='{"provider":{"anthropic":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode`}) ||
+		anthropic[2] != (launchCmd{Client: "Pi", Note: `first set ~/.pi/agent/models.json providers.anthropic.baseUrl="http://localhost:8787"`, Cmd: "pi --provider anthropic"}) {
+		t.Errorf("anthropic launch cmds = %+v", anthropic)
 	}
-	vertex := launchLines(config{Port: "8787", Routes: mustRoutes(t, "https://us-east5-aiplatform.googleapis.com/v1")})
-	if len(vertex) != 1 || vertex[0] != "Claude Code: CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=http://localhost:8787 claude" {
-		t.Errorf("vertex launch lines = %q", vertex)
+
+	vertex := launchBlocks(config{Port: "8787", Routes: mustRoutes(t, "https://us-east5-aiplatform.googleapis.com/v1")})
+	if len(vertex) != 1 || len(vertex[0].Cmds) != 1 ||
+		vertex[0].Cmds[0] != (launchCmd{Client: "Claude Code", Cmd: "CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_BASE_URL=http://localhost:8787 claude"}) {
+		t.Errorf("vertex launch cmds = %+v", vertex)
 	}
+
 	for base, provider := range map[string]string{"https://api.openai.com/v1": "openai", "https://chatgpt.com/backend-api/codex": "openai-codex"} {
-		lines := launchLines(config{Port: "8787", Routes: mustRoutes(t, base)})
-		if len(lines) != 3 {
-			t.Fatalf("OpenAI launch lines = %q", lines)
+		blocks := launchBlocks(config{Port: "8787", Routes: mustRoutes(t, base)})
+		if len(blocks) != 1 || len(blocks[0].Cmds) != 3 {
+			t.Fatalf("OpenAI launch blocks = %+v", blocks)
+		}
+		if blocks[0].Notice == "" {
+			t.Errorf("OpenAI host %s got no auth notice", base)
 		}
 		auth := "OpenAI API key"
 		if provider == "openai-codex" {
 			auth = "ChatGPT login/OAuth"
 		}
-		if lines[0] != `Codex (`+auth+`): codex -c 'openai_base_url="http://localhost:8787"'` {
-			t.Errorf("Codex launch line = %q", lines[0])
+		cmds := blocks[0].Cmds
+		if cmds[0] != (launchCmd{Client: "Codex", Note: auth, Cmd: `codex -c 'openai_base_url="http://localhost:8787"'`}) {
+			t.Errorf("Codex launch cmd = %+v", cmds[0])
 		}
-		if lines[1] != `OpenCode (`+auth+`): OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode` {
-			t.Errorf("OpenCode launch line = %q", lines[1])
+		if cmds[1] != (launchCmd{Client: "OpenCode", Note: auth, Cmd: `OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode`}) {
+			t.Errorf("OpenCode launch cmd = %+v", cmds[1])
 		}
-		wantPi := `Pi: set ~/.pi/agent/models.json providers.` + provider + `.baseUrl="http://localhost:8787", then run pi --provider ` + provider
-		if lines[2] != wantPi {
-			t.Errorf("Pi launch line = %q", lines[2])
+		wantPi := launchCmd{Client: "Pi", Note: `first set ~/.pi/agent/models.json providers.` + provider + `.baseUrl="http://localhost:8787"`, Cmd: "pi --provider " + provider}
+		if cmds[2] != wantPi {
+			t.Errorf("Pi launch cmd = %+v", cmds[2])
 		}
 	}
+
 	// A gateway serves every dialect it was configured for on one base URL, so
-	// every client that could be pointed at it gets a line.
-	gateway := launchLines(config{Port: "8787", Routes: mustRoutes(t, "http://localhost:4000")})
-	if len(gateway) != 3 ||
-		gateway[0] != "Claude Code: ANTHROPIC_BASE_URL=http://localhost:8787 ANTHROPIC_AUTH_TOKEN=<gateway key> claude" ||
-		gateway[1] != `Codex: codex -c 'openai_base_url="http://localhost:8787"'` ||
-		gateway[2] != "OpenCode/Pi: set the selected provider's base URL to http://localhost:8787" {
-		t.Errorf("gateway launch lines = %q", gateway)
+	// every client that could be pointed at it gets a command.
+	gateway := launchBlocks(config{Port: "8787", Routes: mustRoutes(t, "http://localhost:4000")})
+	if len(gateway) != 1 || len(gateway[0].Cmds) != 3 ||
+		gateway[0].Cmds[0] != (launchCmd{Client: "Claude Code", Note: "the token is the gateway's key", Cmd: "ANTHROPIC_BASE_URL=http://localhost:8787 ANTHROPIC_AUTH_TOKEN=<gateway key> claude"}) ||
+		gateway[0].Cmds[1] != (launchCmd{Client: "Codex", Cmd: `codex -c 'openai_base_url="http://localhost:8787"'`}) ||
+		gateway[0].Cmds[2] != (launchCmd{Client: "OpenCode / Pi", Note: "set the selected provider's base URL to http://localhost:8787"}) {
+		t.Errorf("gateway launch blocks = %+v", gateway)
 	}
 }
 
 // The mixed case, which is the whole point: Claude Code and OpenCode reach
 // their own upstreams on the bare URL, and only Codex — which would collide
-// with OpenCode's Responses traffic — is told to use a prefix.
-func TestLaunchLinesForSeveralUpstreams(t *testing.T) {
-	lines := launchLines(config{Port: "8787", Routes: mustRoutes(t,
+// with OpenCode's Responses traffic — is told to use a prefix. Each block is
+// labelled, because with several routes the port alone no longer says where a
+// command's traffic goes.
+func TestLaunchBlocksForSeveralUpstreams(t *testing.T) {
+	blocks := launchBlocks(config{Port: "8787", Routes: mustRoutes(t,
 		"anthropic=https://api.anthropic.com,openai=https://api.openai.com/v1,codex=https://chatgpt.com/backend-api/codex")})
-	joined := strings.Join(lines, "\n")
-
+	if len(blocks) != 3 {
+		t.Fatalf("blocks = %+v", blocks)
+	}
+	if blocks[0].Label != "anthropic → https://api.anthropic.com" {
+		t.Errorf("first label = %q", blocks[0].Label)
+	}
+	joined := ""
+	for _, blk := range blocks {
+		for _, c := range blk.Cmds {
+			joined += c.Note + " " + c.Cmd + "\n"
+		}
+	}
 	for _, want := range []string{
-		"[anthropic → https://api.anthropic.com]",
-		"Claude Code: ANTHROPIC_BASE_URL=http://localhost:8787 claude",
-		`OpenCode (OpenAI API key): OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode`,
-		`Codex (ChatGPT login/OAuth): codex -c 'openai_base_url="http://localhost:8787/tt/codex"'`,
+		"ANTHROPIC_BASE_URL=http://localhost:8787 claude",
+		`OpenAI API key OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"options":{"baseURL":"http://localhost:8787"}}}}' opencode`,
+		`ChatGPT login/OAuth codex -c 'openai_base_url="http://localhost:8787/tt/codex"'`,
 	} {
 		if !strings.Contains(joined, want) {
-			t.Errorf("launch lines missing %q:\n%s", want, joined)
+			t.Errorf("launch cmds missing %q:\n%s", want, joined)
 		}
 	}
 	// The Anthropic block must not claim the prefix — it is the only Anthropic
 	// route, so detection already sends it there.
 	if strings.Contains(joined, "http://localhost:8787/tt/anthropic") {
 		t.Errorf("anthropic was given a prefix it does not need:\n%s", joined)
+	}
+	// The OpenAI-host warnings ride their own blocks, which the labels name.
+	if blocks[1].Notice == "" || blocks[2].Notice == "" {
+		t.Errorf("OpenAI-host blocks lost their auth notices: %+v", blocks[1:])
+	}
+}
+
+// The startup screen is the whole first-run contract in one read: where the
+// proxy is, where the dashboard is, and a paste-ready command per client.
+func TestStartupScreen(t *testing.T) {
+	screen := startupScreen(config{Port: "8787", DBPath: "./tokentracer.db",
+		Routes: mustRoutes(t, "https://api.anthropic.com")}, ".env (applied)")
+
+	for _, want := range []string{
+		"Proxy      http://localhost:8787 → https://api.anthropic.com",
+		"Dashboard  http://localhost:8787/dashboard",
+		"Database   ./tokentracer.db",
+		"Config     .env (applied)",
+		"Launch your agent through the proxy",
+		"\n  Claude Code\n  $ ANTHROPIC_BASE_URL=http://localhost:8787 claude\n",
+		"\n  Pi — first set ~/.pi/agent/models.json",
+		"  $ pi --provider anthropic\n",
+	} {
+		if !strings.Contains(screen, want) {
+			t.Errorf("startup screen missing %q:\n%s", want, screen)
+		}
 	}
 }
 
@@ -202,24 +251,6 @@ func TestAuthNotice(t *testing.T) {
 		if got := authNotice(upstreamURL); got != want {
 			t.Errorf("authNotice(%q) = %q, want %q", upstreamURL, got, want)
 		}
-	}
-}
-
-// With several upstreams, "the upstream" no longer identifies which one a
-// warning is about, so each notice is named. With one, the name would be noise.
-func TestAuthNoticesName_TheUpstreamOnlyWhenThereAreSeveral(t *testing.T) {
-	one := authNotices(mustRoutes(t, "https://api.openai.com/v1"))
-	if len(one) != 1 || strings.HasPrefix(one[0], "openai — ") {
-		t.Errorf("single-upstream notices = %q, want the bare warning", one)
-	}
-
-	several := authNotices(mustRoutes(t,
-		"anthropic=https://api.anthropic.com,openai=https://api.openai.com/v1,codex=https://chatgpt.com/backend-api/codex"))
-	if len(several) != 2 {
-		t.Fatalf("notices = %q, want one per OpenAI-host route", several)
-	}
-	if !strings.HasPrefix(several[0], "openai — ") || !strings.HasPrefix(several[1], "codex — ") {
-		t.Errorf("notices = %q, want each named", several)
 	}
 }
 

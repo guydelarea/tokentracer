@@ -86,7 +86,7 @@ stores the credential; the client's `Authorization` header passes through.
 Pick 1 for anything speaking the Anthropic API — Claude Code, Pi, and
 OpenCode's `anthropic` provider alike.
 
-Then it listens on `:8787` and forwards upstream, writing `./tokentracer.db`. In another terminal, launch your client through the proxy — the startup log prints the exact line for your backend:
+Then it listens on `:8787` and forwards upstream, writing `./tokentracer.db`. The startup screen shows where the proxy and dashboard are and prints a paste-ready launch command for each client you chose — in another terminal, run yours:
 
 ```bash
 # Anthropic API
