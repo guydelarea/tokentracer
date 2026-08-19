@@ -1,0 +1,30 @@
+# gitleaks config for tokentracer.
+#
+# A scanner that cries wolf gets ignored, so the known-benign hits are silenced
+# here — and nothing else is.
+
+[extend]
+useDefault = true
+
+# The redactor's own test suite is made of documented example credentials
+# (GitHub's ghp_16C7e42F… doc token, AWS's …EXAMPLEKEY, a toy JWT). The whole
+# point of the file is to look like a leak.
+[[allowlists]]
+paths = ['''internal/redact/redact_test\.go''']
+
+[[allowlists]]
+regexes = [
+    # RFC 6455's sample Sec-WebSocket-Key ("the sample nonce"), used as a
+    # fixture in internal/proxy/websocket_test.go.
+    '''dGhlIHNhbXBsZSBub25jZQ==''',
+    # UUID prompt_cache_key fixture in internal/openai/openai_test.go — a
+    # session id shape, not a credential.
+    '''019fa00f-68e9-7553-84dc-da2b03b7521c''',
+]
+
+[[rules]]
+id = "generic-api-key"
+[rules.allowlist]
+description = "Dated Claude model identifiers in the generated rate table are public names, not secrets (claude-opus-4-1-20250805 etc). They only trip the entropy heuristic."
+paths = ['''internal/billing/rates\.go''']
+regexes = ['''claude-[a-z0-9.\-]*\d{8}''']

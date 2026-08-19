@@ -1,0 +1,31 @@
+# Secret scanning over the full git history on every push and PR, plus a
+# weekly run so newly added gitleaks rules get a chance at old commits.
+#
+# gitleaks-action is free for personal accounts; an organization repo would
+# additionally need a GITLEAKS_LICENSE secret.
+name: gitleaks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history, not just the tip
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The log and exit code are the signal; uploading the SARIF report
+          # as an artifact just burns storage quota.
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false

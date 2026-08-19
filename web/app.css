@@ -1,0 +1,301 @@
+/* TokenTracer dashboard.
+   Synced from the Claude Design project — that file is the source of truth for
+   every colour, size and track width below.
+
+   The palette is load-bearing: a colour means the same thing everywhere —
+   #2fbf87 cache read, #5aa2f7 fresh input, #d9a04e cache write, #ededed output,
+   #ff5a5a error, #a78bfa thinking. */
+
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:#000}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,'Helvetica Neue',Arial,sans-serif;color:#e8e8e8;-webkit-font-smoothing:antialiased;min-width:1180px;min-height:100vh;background:radial-gradient(1300px 620px at 14% -120px,rgba(90,162,247,0.14),transparent 74%),radial-gradient(1100px 560px at 88% -140px,rgba(47,191,135,0.10),transparent 74%),linear-gradient(180deg,#10131a 0%,#06070c 560px,#000 1200px)}
+@keyframes ttNum{from{opacity:0.15}to{opacity:1}}
+@keyframes ttRowIn{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+@keyframes ttPulse{0%{opacity:1}50%{opacity:0.2}100%{opacity:1}}
+@keyframes ttPanel{from{opacity:0;transform:translateX(16px)}to{opacity:1;transform:none}}
+@keyframes ttFade{from{opacity:0}to{opacity:1}}
+::selection{background:rgba(255,255,255,0.22)}
+
+.m{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.wrap{max-width:1560px;margin:0 auto;padding:0 32px}
+.cap{font-size:10px;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;color:#6e6e6e}
+.cap .sub{color:#484848;letter-spacing:0.06em;text-transform:none;font-weight:400}
+.hdrline{display:flex;align-items:baseline;justify-content:space-between}
+.note{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10.5px;color:#5a5a5a}
+.dot{width:5px;height:5px;border-radius:50%;flex:none}
+.sw{width:8px;height:8px;flex:none}
+.bar{display:flex;overflow:hidden;background:rgba(255,255,255,0.04)}
+.bar span{display:block}
+.r{text-align:right}
+/* line-height is load-bearing: overflow:hidden on a line-height:normal box clips
+   the underscore off tool_use, max_tokens and every mcp__server__tool name. */
+.ell{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.6}
+.track{display:block;height:3px;background:rgba(255,255,255,0.06)}
+.track i{display:block;height:3px;background:#8f8f8f}
+
+/* header */
+.bar-top{border-bottom:1px solid rgba(255,255,255,0.07)}
+.bar-top .in{max-width:1560px;margin:0 auto;padding:0 32px;height:52px;display:flex;align-items:center;justify-content:space-between}
+.nav{display:flex;align-items:center}
+.brand{display:flex;align-items:center;gap:11px}
+/* The two screens the header switches between. */
+.views{display:flex;gap:20px;margin-left:34px}
+.views a{font-size:10px;font-weight:600;letter-spacing:0.12em;text-transform:uppercase;color:#6f6f6f;text-decoration:none;padding:18px 2px 16px;border-bottom:1px solid transparent}
+.views a:hover{color:#ffffff}
+.views a.on{color:#ffffff;border-bottom-color:#e8e8e8}
+.word{font-size:12px;letter-spacing:0.2em;color:#ffffff}
+.word b{font-weight:700}
+.word i{font-style:normal;font-weight:400;color:#b5b5b5}
+.hdrs{display:flex;align-items:center;gap:20px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:#6a6a6a}
+.hdrs .live{display:flex;align-items:center;gap:7px}
+.hdrs .live .dot{background:#ffffff;animation:ttPulse 2.6s ease-in-out infinite}
+
+/* Capture retention. Header furniture, not a call to action: it reads as the
+   status line it sits in until you go looking for it. */
+.keep{display:flex;align-items:center;gap:8px}
+.keep label{color:#4e4e4e}
+.keep select,.keep button{font-family:inherit;font-size:11px;color:#8a8a8a;background:transparent;border:1px solid rgba(255,255,255,0.12);padding:2px 5px;cursor:pointer}
+.keep select:hover,.keep button:hover{color:#ededed;border-color:rgba(255,255,255,0.28)}
+.keep select option{background:#0a0a0a;color:#ededed}
+/* The one destructive control on the page, so it says so on approach. */
+.keep button:hover{color:#ff5a5a;border-color:rgba(255,90,90,0.45)}
+
+/* An unpriced row has no rate for its model. It must never render as $0.00 —
+   that is the exact footgun this project exists to fix. */
+.badge{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;padding:2px 6px;white-space:nowrap}
+.badge.unp{color:#d9a04e;border:1px solid rgba(217,160,78,0.45);background:rgba(217,160,78,0.07)}
+
+/* ---------- overview ---------- */
+.tiles{display:grid;grid-template-columns:1.3fr 1.1fr 0.95fr 0.8fr;gap:48px;align-items:start}
+.tile-sub{margin-top:11px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:#8a8a8a;line-height:1.55}
+.big{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:56px;font-weight:500;line-height:1;letter-spacing:-1.5px;color:#fafafa}
+.mid{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:30px;font-weight:500;line-height:1;color:#f0f0f0}
+.unit{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;color:#666666}
+.val{display:flex;align-items:baseline;gap:6px;margin-top:14px}
+/* The waste tile is a link: it opens the cut list of the session shipping it. */
+.tile.click{cursor:pointer}
+.tile.click:hover{opacity:0.82}
+
+/* legend */
+.leg{display:flex;gap:16px;align-items:center}
+.leg div{display:flex;align-items:center;gap:6px}
+.leg span.t{font-size:10.5px;color:#7a7a7a}
+
+/* charts */
+.chart{position:relative;margin-top:14px}
+.grid{position:absolute;left:0;right:0;border-top:1px solid rgba(255,255,255,0.04)}
+.cols{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:flex-end;gap:1px}
+.col{position:relative;flex:1 1 0;min-width:1px;height:100%;display:flex;flex-direction:column-reverse}
+.col:hover{opacity:0.8}
+.col i{display:block;font-style:normal}
+.col .err{position:absolute;top:0;left:20%;right:20%;background:#ff5a5a}
+.axis{display:flex;justify-content:space-between;margin-top:9px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;color:#4f4f4f}
+/* Per-request bars are capped so a short session does not draw fence posts. */
+.chart.perreq .col{max-width:22px;cursor:pointer}
+.chart.perreq .col:hover{opacity:0.72}
+.chart.perreq .err{left:15%;right:15%}
+/* The cumulative-$ line rides over the staircase it is the integral of. */
+.cum{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none}
+.mark{position:absolute;top:0;bottom:0;border-left:1px dashed rgba(255,255,255,0.28);pointer-events:none}
+.mark span{position:absolute;top:-3px;left:5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9px;letter-spacing:0.08em;color:#7a7a7a;white-space:nowrap}
+
+/* ---------- history ---------- */
+/* The range switcher: 7 / 30 / 90 days, or 12 months. */
+.ranges{display:flex;align-items:baseline;gap:6px}
+.ranges button{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:#8a8a8a;background:transparent;border:1px solid rgba(255,255,255,0.12);padding:4px 12px;cursor:pointer}
+.ranges button:hover{color:#ededed;border-color:rgba(255,255,255,0.28)}
+.ranges button.on{color:#ffffff;border-color:rgba(255,255,255,0.45);background:rgba(255,255,255,0.05)}
+.ranges .span{margin-left:14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:#5f5f5f}
+/* A bar's own figure, when there are few enough bars to label. */
+.col .lbl{position:absolute;left:0;right:0;text-align:center;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;color:#8a8a8a}
+.mrow{display:grid;grid-template-columns:10px minmax(140px,1fr) 1.2fr 64px 74px;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.045)}
+/* Insights stack down the right-hand column here rather than sitting three across. */
+.cards.one{grid-template-columns:1fr}
+/* The day / month table: six tracks, the cost mix the only elastic one. */
+.dgrid{display:grid;grid-template-columns:136px 62px 78px minmax(160px,1fr) 58px 88px;gap:0 16px}
+.drow{align-items:center;padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.045)}
+.drow:hover{background:rgba(255,255,255,0.028)}
+.dday{font-size:12.5px;color:#c9c9c9}
+.dday .wd{margin-right:8px;font-size:10.5px;letter-spacing:0.08em;text-transform:uppercase;color:#6e6e6e}
+
+/* ---------- sessions table ---------- */
+/* Ten tracks. Session is the only elastic one — it carries the prompt, which is
+   the only thing here whose length nobody controls. */
+.sgrid{display:grid;grid-template-columns:46px minmax(230px,1.4fr) 84px 52px 74px 74px 70px 80px 78px 60px;gap:0 16px}
+.shead{padding:12px 0 8px;font-size:9.5px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#565656;border-bottom:1px solid rgba(255,255,255,0.08)}
+.sday{display:flex;align-items:center;gap:12px;padding:24px 0 7px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#8f8f8f}
+.shead + .sday{padding-top:14px}
+.sday i{height:1px;flex:1;background:rgba(255,255,255,0.08)}
+.srow{align-items:center;padding:11px 0;border-bottom:1px solid rgba(255,255,255,0.045);color:inherit;text-decoration:none;cursor:pointer}
+.srow:hover{background:rgba(255,255,255,0.028)}
+.state{display:flex;align-items:center;gap:5px}
+.state .tx{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9.5px;letter-spacing:0.06em}
+.slabel{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.snum{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;text-align:right}
+.mixbar{display:flex;height:5px;overflow:hidden;background:rgba(255,255,255,0.05)}
+.empty{padding:34px 0;font-size:13px;color:#7a7a7a;line-height:1.7}
+.empty .m{color:#c9c9c9}
+
+/* Subagent sessions fold into their parent's row; the chip is all that shows
+   on the front page, and the drill-down list lives in the trace. */
+.agn{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9px;letter-spacing:0.06em;color:#5aa2f7;border:1px solid rgba(90,162,247,0.35);background:rgba(90,162,247,0.07);padding:1px 6px;white-space:nowrap;flex:none}
+.agrow{display:grid;grid-template-columns:24px minmax(220px,1.4fr) 92px 74px 70px 84px;gap:0 16px;align-items:center;padding:9px 0;border-bottom:1px solid rgba(255,255,255,0.045);color:inherit;text-decoration:none;cursor:pointer}
+.agrow:hover{background:rgba(255,255,255,0.028)}
+
+/* Which configured API a session talked to. Drawn only when there is more than
+   one — a badge that always reads the same word is noise, not information. */
+.ups{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9px;letter-spacing:0.06em;color:#9f9f9f;border:1px solid rgba(255,255,255,0.14);padding:1px 6px;white-space:nowrap;flex:none}
+.ufilter{display:flex;align-items:center;gap:6px;margin:14px 0 4px}
+.ufilter .chip{cursor:pointer}
+.ufilter .chip:hover{border-color:rgba(255,255,255,0.3)}
+.ulab{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:#5f5f5f;margin-right:2px}
+
+/* ---------- session trace ---------- */
+.back{display:inline-block;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:#8a8a8a;cursor:pointer}
+.back:hover{color:#ffffff}
+.tracehd{margin-top:20px;font-size:19px;font-weight:600;color:#f2f2f2;max-width:920px;line-height:1.35}
+.tracemeta{margin-top:9px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:#6f6f6f}
+/* The stat strip: one row of facts, wrapping. */
+.stats{display:flex;flex-wrap:wrap;gap:30px;margin-top:30px}
+.stats .v{margin-top:9px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:18px;color:#d9d9d9;padding-top:4px}
+.stats .v.lead{font-size:24px;font-weight:500;color:#fafafa;padding-top:0}
+.stats .v .sub{font-size:13px;color:#6f6f6f}
+.graph-toggle{display:flex;align-items:baseline;gap:11px;margin-top:30px}.graph-toggle button{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;letter-spacing:.06em;color:#9dbce1;background:transparent;border:0;border-bottom:1px dotted rgba(90,162,247,.5);padding:2px 0;cursor:pointer}.graph-toggle button:hover{color:#e1efff}
+.flow-graph{margin-top:12px;overflow-x:auto;border:1px solid rgba(90,162,247,.16);background:linear-gradient(110deg,rgba(90,162,247,.065),rgba(47,191,135,.022) 58%,rgba(255,255,255,.01));padding:14px 16px}.flow-graph-track{display:flex;align-items:stretch;gap:0;min-width:max-content}.flow-graph-node{position:relative;width:174px;min-height:132px;display:flex;flex-direction:column;align-items:stretch;text-align:left;color:#d9d9d9;background:transparent;border:0;padding:0 16px 0 0;cursor:pointer}.flow-graph-node:after{content:'›';position:absolute;right:3px;top:55px;color:#335168;font-size:20px}.flow-graph-node:last-child:after{display:none}.flow-graph-head{display:flex;justify-content:space-between;align-items:center;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9px;color:#5f5f5f}.flow-graph-head span{width:16px;height:16px;display:grid;place-items:center;border-radius:50%;color:#b6d4f1;background:rgba(90,162,247,.15);border:1px solid rgba(90,162,247,.32)}.flow-graph-node.err .flow-graph-head span{color:#ff9a9a;background:rgba(255,90,90,.12);border-color:rgba(255,90,90,.35)}.flow-graph-node strong{min-height:36px;margin-top:9px;font-size:11px;font-weight:500;line-height:1.4;overflow:hidden}.flow-graph-results,.flow-graph-calls{display:flex;flex-direction:column;gap:4px;margin-top:6px;padding-left:7px;border-left:1px solid rgba(255,255,255,.1)}.flow-graph-node i,.flow-graph-reply{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9px;font-style:normal;color:#d0a85d;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.flow-graph-calls i{color:#80b7ec}.flow-graph-calls i.spawn{color:#b99bea}.flow-graph-reply{margin-top:8px;color:#5f5f5f}.flow-graph-note{margin-top:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9.5px;color:#5f5f5f}
+
+/* The causal trace is deliberately narrow and editorial: a session is a chain
+   of hand-offs, not a second dense metrics table. The left rail makes the
+   chronological parentage legible even when a turn has several tool calls. */
+.flow{margin-top:42px;padding:20px 22px 4px;border:1px solid rgba(90,162,247,0.16);background:linear-gradient(110deg,rgba(90,162,247,0.075),rgba(47,191,135,0.025) 54%,rgba(255,255,255,0.012))}
+.flow.flow-inline{margin:0;padding:15px 18px 2px;border-width:0 0 1px;border-color:rgba(90,162,247,.13);background:rgba(90,162,247,.035)}
+.flow-inline .flow-list{margin-top:13px}.flow-inline .flow-turn{padding-bottom:10px;min-height:0}.flow-inline .flow-rail:before{display:none}
+.flow-legend{display:flex;flex-wrap:wrap;gap:15px;margin-top:13px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9.5px;color:#6f6f6f}
+.flow-legend span{display:flex;align-items:center;gap:5px}
+.flow-dot{width:6px;height:6px;border-radius:50%;display:block}.flow-dot.user{background:#ededed}.flow-dot.result{background:#d9a04e}.flow-dot.call{background:#5aa2f7}.flow-dot.spawn{background:#a78bfa}
+.flow-list{margin-top:19px}
+.flow-turn{position:relative;display:grid;grid-template-columns:24px minmax(0,1fr);min-height:54px;padding-bottom:14px;animation:ttRowIn .22s ease-out both}.flow-turn.err{opacity:.78}
+/* A frame drawn by the 2s poll re-uses this markup for detail that is already
+   on screen and being read. Playing the entry animation again would make it
+   twitch every two seconds; the numbers still update underneath. */
+#app.quiet .flow-turn{animation:none}
+.flow-rail{position:relative}.flow-rail:before{content:'';position:absolute;left:4px;top:8px;bottom:-14px;width:1px;background:rgba(255,255,255,.12)}.flow-turn:last-child .flow-rail:before{display:none}.flow-rail span{position:absolute;z-index:1;top:5px;left:0;width:9px;height:9px;border-radius:50%;background:#5aa2f7;border:2px solid #11151c;box-shadow:0 0 0 2px rgba(90,162,247,.13)}
+.flow-body{min-width:0}.flow-meta{display:flex;align-items:center;gap:9px;font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:#5f5f5f}.flow-status{margin-left:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:0}
+.flow-ask{display:flex;gap:10px;align-items:baseline;margin-top:7px;line-height:1.45}.flow-ask span,.flow-kind{flex:none;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9px;letter-spacing:.11em;color:#8f8f8f}.flow-ask strong{font-size:12.5px;font-weight:500;color:#e8e8e8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.flow-results,.flow-calls{margin-top:8px;padding-left:12px;border-left:1px solid rgba(255,255,255,.09)}.flow-result,.flow-call{display:flex;align-items:baseline;gap:8px;min-width:0;padding:4px 0}.flow-arrow{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#555;flex:none}.flow-result .flow-kind{color:#d9a04e}.flow-call .flow-kind{color:#5aa2f7}.flow-call.spawn .flow-kind{color:#a78bfa}.flow-name{font-size:11px;color:#d9d9d9;flex:none}.flow-detail{min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10.5px;color:#777;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.flow-agent{margin-left:auto;max-width:290px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9.5px;color:#bca7e8;background:transparent;border:0;border-bottom:1px dotted rgba(167,139,250,.45);padding:0;text-decoration:none;cursor:pointer}.flow-agent:hover{color:#e1d7ff}.flow-reply,.flow-missing{margin-top:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;color:#5f5f5f}.flow-missing{color:#8a6f46}
+
+/* Do next: the advice, priced and ranked. */
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:14px}
+.card{border:1px solid rgba(255,255,255,0.09);background:rgba(255,255,255,0.018);padding:16px 18px}
+.card .top{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+.card .tag{font-size:9px;font-weight:600;letter-spacing:0.14em;text-transform:uppercase}
+.card .usd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:15px;color:#fafafa}
+.card .t{margin-top:10px;font-size:13.5px;font-weight:600;color:#ececec;line-height:1.4}
+.card .b{margin-top:8px;font-size:11.5px;color:#8a8a8a;line-height:1.6}
+
+.two{display:grid;gap:60px;margin-top:48px}
+.two.a{grid-template-columns:1.12fr 0.88fr}
+.two.b{grid-template-columns:1.15fr 0.85fr}
+
+/* the stop_reason strip under the output-shape chart */
+.stops{display:flex;gap:1px;margin-top:5px}
+.stops span{flex:1 1 0;min-width:1px;max-width:22px;height:6px}
+.stopnote{display:flex;justify-content:space-between;margin-top:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9.5px;color:#4f4f4f}
+
+.actrow{display:grid;grid-template-columns:minmax(150px,1fr) 42px 84px 60px 38px;gap:12px;align-items:center;padding:9px 0;border-bottom:1px solid rgba(255,255,255,0.045)}
+.actrow .n{font-size:12.5px;color:#c9c9c9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.actrow .n .s{font-size:10.5px;color:#5f5f5f}
+.foot{margin-top:12px;font-size:11px;color:#5f5f5f;line-height:1.6}
+
+/* the cache strip: one cell per request, coloured by what its cache did */
+.cells{display:flex;gap:1px;margin-top:14px}
+.cells span{flex:1 1 0;min-width:1px;max-width:22px;height:14px}
+.breaks{margin-top:16px;border-top:1px solid rgba(255,255,255,0.08)}
+.brow{display:flex;align-items:center;gap:16px;padding:9px 0;border-bottom:1px solid rgba(255,255,255,0.045)}
+.brow .seq{flex:none;width:104px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10.5px;color:#8f8f8f}
+.brow .segs{flex:none;display:inline-flex;gap:1px}
+.brow .segs span{width:14px;height:9px}
+.brow .tx{flex:1 1 0;min-width:0;font-size:11.5px;color:#9f9f9f;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.brow .usd{flex:none;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:#ececec;text-align:right}
+
+.ctxrow{display:grid;grid-template-columns:10px 1fr 90px 52px;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.045)}
+.ctxrow .n{font-size:12.5px;color:#c9c9c9}
+.toprow{display:grid;grid-template-columns:minmax(200px,1fr) 130px 66px 78px;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04)}
+.cutrow{display:grid;grid-template-columns:1fr 74px 84px;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.045)}
+.resrow{display:grid;grid-template-columns:minmax(120px,1fr) 40px 80px 66px 38px;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04)}
+.cuthead{margin-top:16px;font-size:14px;color:#ececec;line-height:1.5}
+.cutsub{margin-top:7px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;color:#8a8a8a}
+.more{display:inline-block;margin-top:14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:#8a8a8a;cursor:pointer;padding:2px 0;border-bottom:1px dotted rgba(255,255,255,0.3)}
+.more:hover{color:#ffffff}
+
+/* the three little charts above the trace list */
+.minis{display:grid;grid-template-columns:1fr 1fr 1fr;gap:44px;margin-top:18px}
+.minis .hd{display:flex;justify-content:space-between;align-items:baseline}
+.minis .hd .t{font-size:9.5px;font-weight:600;letter-spacing:0.12em;text-transform:uppercase;color:#565656}
+.minis .hd .v{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10.5px;color:#8f8f8f}
+.minis .axis{margin-top:7px;font-size:9.5px}
+
+/* the trace list: seven tracks, Operation the only elastic one */
+.qgrid{display:grid;grid-template-columns:64px minmax(280px,1fr) 48px 92px 118px 128px 74px;gap:0 14px}
+.qhead{padding:12px 0 8px;font-size:9.5px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#565656;border-bottom:1px solid rgba(255,255,255,0.08)}
+.qrow{align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.035);cursor:pointer}
+.qrow:hover{background:rgba(255,255,255,0.03)}
+.qrow .op{display:flex;align-items:center;gap:8px;min-width:0}
+.gap{padding:7px 0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;color:#4f4f4f;border-bottom:1px solid rgba(255,255,255,0.035)}
+.lat{display:flex;align-items:center;gap:6px}
+.num{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;color:#9f9f9f}
+
+/* An unfolded trace row: the request's own breakdown, in place under it. */
+.qx{padding:14px 18px 18px;border-bottom:1px solid rgba(255,255,255,0.035);border-left:2px solid rgba(255,255,255,0.16);background:rgba(255,255,255,0.014)}
+.qxask{font-size:12px;color:#c9c9c9;line-height:1.55}
+.qxgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:0 30px;margin-top:14px}
+@media (max-width:1080px){.qxgrid{grid-template-columns:1fr;gap:22px 0}}
+.qxbig{font-size:19px;font-weight:500;color:#fafafa;margin-top:9px}
+.qxlane{display:grid;grid-template-columns:10px 1fr 64px 64px;gap:10px;align-items:center;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04);font-size:11px}
+.qxlane .m{font-size:10.5px}
+
+/* ---------- inspector ---------- */
+#scrim{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.55);z-index:40;animation:ttFade 0.15s ease-out;display:none}
+#insp{position:fixed;top:0;right:0;bottom:0;width:min(620px,92vw);background:linear-gradient(180deg,#11141b 0%,#0b0c10 460px,#0a0a0a 900px);border-left:1px solid rgba(255,255,255,0.09);z-index:41;overflow-y:auto;animation:ttPanel 0.16s ease-out;scrollbar-width:thin;display:none}
+#insp .pad{padding:24px 28px 44px}
+#insp .x{background:transparent;border:none;color:#777777;font-size:17px;cursor:pointer;padding:2px 6px;line-height:1;flex:none}
+#insp .x:hover{color:#ffffff}
+.chip{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;letter-spacing:0.04em;border:1px solid rgba(255,255,255,0.12);padding:3px 8px;white-space:nowrap}
+.chip.off{color:#4f4f4f;border-color:rgba(255,255,255,0.07)}
+.chip.on{color:#e8e8e8;border-color:rgba(255,255,255,0.3)}
+.tabs{display:flex;gap:22px;margin-top:22px;border-bottom:1px solid rgba(255,255,255,0.09)}
+.tab{font-size:10px;font-weight:600;letter-spacing:0.12em;text-transform:uppercase;color:#6f6f6f;border-bottom:1px solid transparent;margin-bottom:-1px;padding:8px 2px;cursor:pointer}
+.tab:hover{color:#ffffff}
+.tab.on{color:#ffffff;border-bottom-color:#e8e8e8}
+.errbox{margin-top:16px;border:1px solid rgba(255,90,90,0.35);background:rgba(255,90,90,0.05);padding:12px 14px}
+.warnbox{margin-top:16px;border:1px solid rgba(217,160,78,0.3);background:rgba(217,160,78,0.05);padding:12px 14px;font-size:11.5px;color:#c9a97a;line-height:1.6}
+.lanerow{display:grid;grid-template-columns:10px 1fr 90px 90px;gap:12px;align-items:center;padding:9px 0;border-bottom:1px solid rgba(255,255,255,0.045)}
+.audrow{display:grid;grid-template-columns:10px 1fr 90px 52px;gap:12px;align-items:center;padding:9px 0;border-bottom:1px solid rgba(255,255,255,0.045)}
+.toolrow{display:grid;grid-template-columns:minmax(180px,1fr) 110px 62px 76px;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04)}
+.sysrow{display:grid;grid-template-columns:78px 1fr 70px;gap:12px;align-items:center;padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.04)}
+.msgrow{display:grid;grid-template-columns:78px 1fr 70px;gap:12px;align-items:center;padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.04)}
+.histrow{display:grid;grid-template-columns:76px 1fr 56px;gap:12px;align-items:baseline;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.035)}
+/* An unfolded message: its blocks, indented under the row that named it. */
+.msgx{margin:2px 0 8px;padding:2px 0 4px 14px;border-left:1px solid rgba(255,255,255,0.09)}
+.msgx pre{max-height:300px}
+/* One content block — of a message, or of the reply — named and sized. */
+.blk{margin-top:12px;border:1px solid rgba(255,255,255,0.07);background:rgba(255,255,255,0.014);padding:10px 12px 12px}
+.blk .bh{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-size:9.5px;font-weight:600;letter-spacing:0.12em;text-transform:uppercase}
+.blk .bh .m{font-size:10px;font-weight:400;letter-spacing:0;text-transform:none;color:#5f5f5f}
+.blk pre{margin-top:10px}
+.blk .more{margin-top:10px}
+/* The raw tab's request / response switch. */
+.rsw{font-size:10px;font-weight:600;letter-spacing:0.12em;text-transform:uppercase;color:#5f5f5f;cursor:pointer;padding-bottom:2px;border-bottom:1px solid transparent}
+.rsw:hover{color:#ffffff}
+.rsw.on{color:#ffffff;border-bottom-color:#e8e8e8}
+.rawbox{margin-top:12px;background:#050505;border:1px solid rgba(255,255,255,0.05);padding:14px;max-height:380px;overflow:auto}
+.rawrow{display:grid;grid-template-columns:30px 1fr;gap:14px}
+.rawn{font-size:10.5px;line-height:1.7;color:#3d3d3d;text-align:right}
+.rawtx{font-size:10.5px;line-height:1.7;color:#9a9a9a;white-space:pre-wrap;word-break:break-word}
+pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:1.65;color:#9a9a9a;background:#050505;border:1px solid rgba(255,255,255,0.05);padding:14px;margin:12px 0 0;white-space:pre-wrap;word-break:break-word;max-height:240px;overflow:auto}
+
+#tip{position:fixed;z-index:60;pointer-events:none;display:none;background:#0d0d0d;border:1px solid rgba(255,255,255,0.14);padding:10px 12px;min-width:180px}
+#tip .t{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10.5px;color:#8a8a8a;white-space:nowrap}
+#tip .r{display:flex;align-items:center;gap:8px;margin-top:5px;text-align:left}
+#tip .r .n{font-size:11px;color:#9f9f9f}
+#tip .r .v{margin-left:auto;padding-left:18px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:#e8e8e8}
+#tip .f{margin-top:7px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;color:#5f5f5f;white-space:nowrap}

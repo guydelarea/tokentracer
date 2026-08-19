@@ -1,0 +1,35 @@
+// Type-checks app.js. It emits nothing and it is not a build step: `go build` is
+// still the whole build, and app.js ships to the browser exactly as it is written,
+// because that is the file go:embed reads. There is deliberately no package.json
+// and no node_modules — tsc is fetched on demand:
+//
+//   npx -y -p typescript@5 tsc -p web
+//
+// The strictness below is the most this file passes as written. Two are left off
+// on purpose:
+//   noUncheckedIndexedAccess — every `arr[i]` in a hand-written for-loop would
+//     have to be re-guarded, which is churn in exchange for nothing this code can
+//     actually get wrong.
+//   allowUnreachableCode: false — the `|| {}` and `|| 0` guards are deliberate
+//     belts on braces, and the contract types make some of them provably dead.
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+
+    "target": "ES5",
+    "lib": ["ES2015", "DOM"],
+    "types": [],
+
+    "strict": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "exactOptionalPropertyTypes": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["app.js"]
+}

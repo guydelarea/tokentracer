@@ -1,0 +1,21 @@
+# Binaries
+/tokentracer
+*.exe
+*.test
+*.out
+
+# Local database (created on first run)
+*.db
+*.db-wal
+*.db-shm
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.env
+
+# Local agent scratch (never publish)
+/cc.md
+.claude/

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="340" height="96" viewBox="0 0 340 96" role="img" aria-label="TokenTracer">
+  <rect width="340" height="96" rx="10" fill="#000000"/>
+  <g transform="translate(28 26) scale(1.85)" fill="none" stroke="#ffffff" stroke-width="1.5">
+    <path d="M5 5.5 L11 9 M5 12 L11 9 M5 12 L11 15 M5 18.5 L11 15 M11 9 L19 12 M11 15 L19 12"/>
+    <circle cx="5" cy="5.5" r="2" fill="#000000"/>
+    <circle cx="5" cy="12" r="2" fill="#000000"/>
+    <circle cx="5" cy="18.5" r="2" fill="#000000"/>
+    <circle cx="11" cy="9" r="2" fill="#000000"/>
+    <circle cx="11" cy="15" r="2" fill="#000000"/>
+    <circle cx="19" cy="12" r="2" fill="#000000"/>
+  </g>
+  <text x="106" y="57" font-family="'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="24" letter-spacing="4.8">
+    <tspan font-weight="700" fill="#ffffff">TOKEN</tspan><tspan font-weight="400" fill="#b5b5b5">TRACE</tspan>
+  </text>
+</svg>
