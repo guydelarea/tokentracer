@@ -48,6 +48,20 @@ Everything is recorded in plain SQLite — usage verbatim as the API reported it
 > [!NOTE]
 > On a Claude or ChatGPT subscription you are not paying per token — read the numbers as *"what this usage would have cost on the API"*.
 
+### Supported clients and providers
+
+TokenTracer reads three wire formats — **Anthropic Messages** (direct or via Vertex AI), **OpenAI Responses** (HTTPS and Codex's WebSocket), and **OpenAI-compatible Chat Completions** — and can front [several providers at once](docs/multiple-upstreams.md) behind one port.
+
+| Client | Works with |
+| --- | --- |
+| [Claude Code](https://claude.com/claude-code) | Anthropic API *(tested)*, Vertex AI, [LiteLLM](https://docs.litellm.ai/) or another Anthropic-speaking gateway |
+| [Codex](https://developers.openai.com/codex) | ChatGPT login/OAuth or OpenAI API key *(tested, WebSocket and HTTPS)* |
+| [OpenCode](https://opencode.ai) | ChatGPT login *(tested)*, OpenAI API key, Anthropic API, OpenAI-compatible providers |
+| [Pi](https://pi.dev) | Anthropic API, ChatGPT login, OpenAI API key, OpenAI-compatible providers |
+| Anything else speaking those APIs | Point its base URL at `http://localhost:8787` |
+
+Other wire protocols (direct Gemini, Bedrock, …) are proxied unchanged but not recorded. The full support matrix, with the exact connection line for each client, is in [docs/clients.md](docs/clients.md).
+
 ### Docs
 
 - **[Client setup](docs/clients.md)** — the wizard, launch commands, the support matrix, verifying your client
