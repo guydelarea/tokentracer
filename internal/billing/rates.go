@@ -3,7 +3,8 @@
 //
 // Source: https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
 // OpenAI source: https://developers.openai.com/api/docs/pricing#text-tokens
-// Generated: 2026-07-13, hand-updated 2026-07-26 (GPT-5.6 family and current Claude rows)
+// Anthropic source: https://platform.claude.com/docs/en/about-claude/pricing
+// Generated: 2026-07-13, hand-verified against both vendor pages 2026-08-30
 //
 // Hand-added rows come from the vendors' published list prices, not the registry,
 // which lags a model launch by weeks. A model that ships between regenerations is
@@ -26,42 +27,61 @@
 // From is the zero time on every row: these are current list prices and this project
 // has no verified price history. The [From, Until) machinery exists and is tested,
 // but inventing historical windows would fabricate costs, so it goes unused here.
+// Sonnet 5's introductory rate was the one dated price this table ever carried;
+// Anthropic has since made $2/$10 the standard price and cancelled the increase
+// that was scheduled for 2026-09-01, so the window is gone rather than expired.
 //
-// Long-context tiers: the registry carries above-200K input/output rates only for
-// the sonnet-4 family. claude-sonnet-5 and the opus-4-5+ generation ship a 1M
-// window at standard rates with no long-context premium, so none is asserted for
-// them. That is a fact about those models, not an omission.
+// Long-context tiers: NO Claude model has one. Claude 4.6 and later ship a 1M
+// window at standard rates, and every earlier model tops out at 200k, so there is
+// no window in which a premium could apply. The registry's above-200K rates for
+// the sonnet-4 family described a beta that no longer exists; carrying them
+// asserted a tier the vendor has stopped publishing and no request could reach.
+// The GPT-5.6 family is the only long-context tier here: it prices the WHOLE
+// request at 2x input and 1.5x output once input passes 272K, which is what the
+// LongCtx* fields model. The machinery stays covered by synthetic-rate tests.
+//
+// Published price modifiers deliberately NOT modelled here, because the facts
+// they key off are not on the row: Anthropic fast mode (Opus 5 / Opus 4.8 at
+// $10/$50 on speed:"fast"), US-pinned inference (inference_geo:"us", 1.1x on
+// every category for 4.6+), OpenAI's own fast mode, and both vendors' 50% batch
+// discount. Each would need capturing before it could be priced. Until then such
+// an exchange is reported at the standard rate — under-billed for the premiums,
+// over-billed for batch. This list is the known set, not a guarantee of one.
 
 package billing
 
-import "time"
-
-// Sonnet 5 launched at an introductory rate Anthropic publishes as "$2/$10 per
-// MTok through 2026-08-31". This is the one price in the table with a known end
-// date, so it is the one place the [From, Until) machinery earns its keep: past
-// the boundary the same key prices at the standard $3/$15, and a session traced
-// on either side of it bills at what it actually cost.
-var sonnet5StandardFrom = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
-
 var Rates = []Rate{
-	{Key: "gpt-5.6-terra", InPerM: 2.5, OutPerM: 15, LongCtxThreshold: 272_000, LongCtxInPerM: 5, LongCtxOutPerM: 22.5},
-	{Key: "gpt-5.6-luna", InPerM: 1, OutPerM: 6, LongCtxThreshold: 272_000, LongCtxInPerM: 2, LongCtxOutPerM: 9},
-	{Key: "gpt-5.6-sol", InPerM: 5, OutPerM: 30, LongCtxThreshold: 272_000, LongCtxInPerM: 10, LongCtxOutPerM: 45},
-	{Key: "gpt-5.6", InPerM: 5, OutPerM: 30, LongCtxThreshold: 272_000, LongCtxInPerM: 10, LongCtxOutPerM: 45},
+	// GPT-5.6: the three variants price differently, and "gpt-5.6" is the
+	// published alias for sol — it must sort after the variants so it does not
+	// swallow them. 272_000 is a cliff, not a tier: one token over and the
+	// entire request reprices.
+	{Key: "gpt-5.6-terra", InPerM: 2, OutPerM: 12, LongCtxThreshold: 272_000, LongCtxInPerM: 4, LongCtxOutPerM: 18},
+	{Key: "gpt-5.6-luna", InPerM: 0.2, OutPerM: 1.2, LongCtxThreshold: 272_000, LongCtxInPerM: 0.4, LongCtxOutPerM: 1.8},
+	{Key: "gpt-5.6-sol", InPerM: 4, OutPerM: 20, LongCtxThreshold: 272_000, LongCtxInPerM: 8, LongCtxOutPerM: 30},
+	// KNOWN EXCEPTION to the no-bare-family-fallback rule below. "gpt-5.6" is a
+	// published alias for sol, so it earns a row — but it is matched as a
+	// substring like every other key, so an unreleased "gpt-5.6-pro" would
+	// silently inherit sol's price instead of coming out UNPRICED (gpt-5.5-pro
+	// is $30/$180 against gpt-5.5's $5/$30, so the error would be large). The
+	// ordering test cannot catch this: it compares keys to keys, never model
+	// names to keys. Delete this row if a variant ships that it would swallow.
+	{Key: "gpt-5.6", InPerM: 4, OutPerM: 20, LongCtxThreshold: 272_000, LongCtxInPerM: 8, LongCtxOutPerM: 30},
 	{Key: "claude-3-7-sonnet-20250219", InPerM: 3, OutPerM: 15},
-	{Key: "claude-sonnet-4-5-20250929", InPerM: 3, OutPerM: 15, LongCtxThreshold: 200_000, LongCtxInPerM: 6, LongCtxOutPerM: 22.5},
+	{Key: "claude-sonnet-4-5-20250929", InPerM: 3, OutPerM: 15},
 	{Key: "claude-haiku-4-5-20251001", InPerM: 1, OutPerM: 5},
-	{Key: "claude-4-sonnet-20250514", InPerM: 3, OutPerM: 15, LongCtxThreshold: 200_000, LongCtxInPerM: 6, LongCtxOutPerM: 22.5},
+	{Key: "claude-4-sonnet-20250514", InPerM: 3, OutPerM: 15},
 	{Key: "claude-opus-4-1-20250805", InPerM: 15, OutPerM: 75},
 	{Key: "claude-opus-4-5-20251101", InPerM: 5, OutPerM: 25},
-	{Key: "claude-opus-4-6-20260205", InPerM: 5, OutPerM: 25},
-	{Key: "claude-opus-4-7-20260416", InPerM: 5, OutPerM: 25},
-	{Key: "claude-sonnet-4-20250514", InPerM: 3, OutPerM: 15, LongCtxThreshold: 200_000, LongCtxInPerM: 6, LongCtxOutPerM: 22.5},
+	{Key: "claude-sonnet-4-20250514", InPerM: 3, OutPerM: 15},
 	{Key: "claude-3-haiku-20240307", InPerM: 0.25, OutPerM: 1.25},
+	// Retired on the first-party API, still served on Bedrock and Google Cloud,
+	// which this proxy sits in front of. A live route with no row is an UNPRICED
+	// session, and this price is published.
+	{Key: "claude-3-5-haiku-20241022", InPerM: 0.8, OutPerM: 4},
 	{Key: "claude-3-opus-20240229", InPerM: 15, OutPerM: 75},
 	{Key: "claude-4-opus-20250514", InPerM: 15, OutPerM: 75},
 	{Key: "claude-opus-4-20250514", InPerM: 15, OutPerM: 75},
-	{Key: "claude-sonnet-4-5", InPerM: 3, OutPerM: 15, LongCtxThreshold: 200_000, LongCtxInPerM: 6, LongCtxOutPerM: 22.5},
+	{Key: "claude-sonnet-4-5", InPerM: 3, OutPerM: 15},
 	{Key: "claude-sonnet-4-6", InPerM: 3, OutPerM: 15},
 	{Key: "claude-haiku-4-5", InPerM: 1, OutPerM: 5},
 	{Key: "claude-opus-4-1", InPerM: 15, OutPerM: 75},
@@ -70,8 +90,7 @@ var Rates = []Rate{
 	{Key: "claude-opus-4-7", InPerM: 5, OutPerM: 25},
 	{Key: "claude-opus-4-8", InPerM: 5, OutPerM: 25},
 	{Key: "claude-mythos-5", InPerM: 10, OutPerM: 50},
-	{Key: "claude-sonnet-5", InPerM: 2, OutPerM: 10, Until: sonnet5StandardFrom},
-	{Key: "claude-sonnet-5", InPerM: 3, OutPerM: 15, From: sonnet5StandardFrom},
+	{Key: "claude-sonnet-5", InPerM: 2, OutPerM: 10},
 	{Key: "claude-fable-5", InPerM: 10, OutPerM: 50},
 	{Key: "claude-opus-5", InPerM: 5, OutPerM: 25},
 }
