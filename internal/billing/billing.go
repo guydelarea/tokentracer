@@ -62,8 +62,12 @@ func ContextWindow(model string) int64 {
 	if strings.Contains(normalized, "gpt-5.6") {
 		return 1_050_000
 	}
-	// Claude Code appends "[1m]" where the big window is opt-in, which is the
-	// only signal for a model whose bare id is 200k (Sonnet 4.5).
+	// Claude Code spells the 1M window as a "[1m]" suffix on the model id
+	// (proxy.go's Vertex path shows "claude-opus-5[1m]" on the wire). Every model
+	// seen carrying it is already in millionTokenModels, so this is belt and
+	// braces, not the only signal — kept because the suffix is unambiguous and
+	// costs nothing, not because some 200k model opts in through it. None does:
+	// where 1M exists it is the default and needs no beta header.
 	if strings.Contains(normalized, "[1m]") {
 		return 1_000_000
 	}
@@ -94,6 +98,7 @@ var millionTokenModels = []string{
 	"claude-sonnet-5",
 	"claude-fable-5",
 	"claude-mythos-5",
+	"claude-mythos-preview",
 }
 
 // ReadPerTok is what one token costs to re-read out of the cached prefix — the
@@ -207,17 +212,22 @@ func match(rates []Rate, model string, at time.Time) (Rate, bool) {
 	return Rate{}, false
 }
 
-// normalize reduces a wire model name to its bare Claude family name, so that
-// one key matches the same model however the gateway spelled it:
+// normalize rewrites a wire model name into the spelling the rate keys use, so
+// that one key matches the same model however the gateway wrote it:
 //
-//	anthropic.claude-sonnet-4@20250514 -> claude-sonnet-4  (Vertex)
-//	anthropic.claude-opus-4-5-v1:0     -> claude-opus-4-5  (Bedrock)
+//	anthropic.claude-sonnet-4@20250514 -> claude-sonnet-4-20250514  (Vertex)
+//	anthropic.claude-opus-4-5-v1:0     -> claude-opus-4-5           (Bedrock)
+//
+// Vertex separates the snapshot date with '@' where the first-party id uses '-'.
+// Cutting the name at the '@' stranded every model whose only key is dated:
+// "claude-opus-4@20250514" became "claude-opus-4", which no key contains, and a
+// live Vertex route came out UNPRICED. Rewriting the separator lands it on the
+// dated key exactly. A name with no dated row still falls through to its bare
+// key, because the rewritten name still contains it.
 func normalize(model string) string {
 	m := strings.ToLower(strings.TrimSpace(model))
 	m = strings.TrimPrefix(m, "anthropic.")
-	if i := strings.IndexByte(m, '@'); i >= 0 {
-		m = m[:i]
-	}
+	m = strings.ReplaceAll(m, "@", "-")
 	if i := strings.Index(m, "-v1:"); i >= 0 {
 		m = m[:i]
 	}

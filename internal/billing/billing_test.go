@@ -32,11 +32,14 @@ func TestNormalize(t *testing.T) {
 	}{
 		{"plain", "claude-sonnet-5", "claude-sonnet-5"},
 		{"bedrock prefix", "anthropic.claude-sonnet-5", "claude-sonnet-5"},
-		{"vertex date suffix", "claude-sonnet-4@20250514", "claude-sonnet-4"},
-		{"prefix and suffix", "anthropic.claude-sonnet-4@20250514", "claude-sonnet-4"},
+		// Vertex's @date becomes the first-party -date rather than being cut off.
+		// Cutting it produced "claude-sonnet-4", which no key contains, so a live
+		// Vertex route priced as UNPRICED.
+		{"vertex date suffix", "claude-sonnet-4@20250514", "claude-sonnet-4-20250514"},
+		{"prefix and suffix", "anthropic.claude-sonnet-4@20250514", "claude-sonnet-4-20250514"},
 		{"bedrock version suffix", "anthropic.claude-opus-4-5-v1:0", "claude-opus-4-5"},
-		// Only Vertex's @date is stripped, never the native -date suffix: the
-		// seed table's keys carry those dates, so stripping would break matching.
+		// The native -date suffix is left exactly as it arrived: the seed table's
+		// keys carry those dates, so rewriting would break matching.
 		{"native dated name is left alone", "claude-opus-4-1-20250805", "claude-opus-4-1-20250805"},
 		{"empty", "", ""},
 	}
@@ -279,10 +282,12 @@ func TestContextWindow(t *testing.T) {
 		{"anthropic/claude-sonnet-5", 1_000_000},
 		{"anthropic.claude-opus-4-8-v1:0", 1_000_000},
 		{"claude-opus-5@20260601", 1_000_000},
-		// The 200k tiers, which must NOT inherit a sibling's window. Sonnet 4.5's
-		// 1M is opt-in, so only the "[1m]" spelling gets it.
+		{"claude-mythos-preview", 1_000_000},
+		// The 200k tiers, which must NOT inherit a sibling's window. Sonnet 4.5
+		// has no 1M variant at all — "Other Claude models, including Claude
+		// Sonnet 4.5, have a 200k-token context window."
 		{"claude-sonnet-4-5", 200_000},
-		{"claude-sonnet-4-5[1m]", 1_000_000},
+		{"claude-sonnet-4-5-20250929", 200_000},
 		{"claude-opus-4-5-20251101", 200_000},
 		{"claude-haiku-4-5", 200_000},
 		{"claude-3-7-sonnet-20250219", 200_000},
@@ -329,6 +334,12 @@ func TestSeedTablePricesGPT56Usage(t *testing.T) {
 			closeTo(t, Compute(Rates, tt.model, Usage{Write5m: 1_000_000}, at).Write, tt.wantWrite*2, "long-context Write")
 			closeTo(t, Compute(Rates, tt.model, Usage{Out: 1_000_000}, at).Out, tt.wantOutput, "standard Output")
 
+			// The three assertions above all clear 272K, so they only ever
+			// exercised the long tier. Pin the short-tier read and write too.
+			short := Usage{Read: 200_000}
+			closeTo(t, Compute(Rates, tt.model, short, at).Read, 0.2*tt.wantCached, "short-context Read")
+			closeTo(t, Compute(Rates, tt.model, Usage{Write5m: 200_000}, at).Write, 0.2*tt.wantWrite, "short-context Write")
+
 			boundary := Compute(Rates, tt.model, Usage{In: 272_000, Out: 1_000_000}, at)
 			closeTo(t, boundary.In, 0.272*tt.wantIn, "boundary In")
 			closeTo(t, boundary.Out, tt.wantOutput, "boundary Output")
@@ -374,6 +385,15 @@ func TestSeedTablePricesRealModelNames(t *testing.T) {
 		"claude-opus-5",
 		"claude-opus-5[1m]",      // Claude Code's 1M-window spelling
 		"claude-opus-5@20260601", // Vertex's spelling
+		// Retired first-party, still served on Bedrock and Google Cloud. Every
+		// spelling must price: a live route that reads UNPRICED is the hole the
+		// row was added to close, and the Vertex one silently stayed open.
+		"claude-3-5-haiku-20241022",
+		"anthropic.claude-3-5-haiku-20241022-v1:0",
+		"claude-3-5-haiku@20241022",
+		"anthropic.claude-sonnet-4@20250514",
+		"claude-3-7-sonnet@20250219",
+		"claude-opus-4@20250514",
 		"claude-mythos-5",
 		"gpt-5.6",
 		"gpt-5.6-sol",
@@ -422,6 +442,12 @@ func TestSeedTablePricesSonnet5AtTheStandardRateForever(t *testing.T) {
 	}
 }
 
+// Ordering invariant: the seed table is sorted most-specific-key-first, so no
+// key may be a substring of a key that appears before it (that earlier, shorter
+// key would swallow every model the later one is meant to catch).
+//
+// This compares keys to keys. It cannot catch a MODEL name that an over-broad
+// key swallows — see the "gpt-5.6" alias carve-out in rates.go.
 func TestSeedTableOrderingIsMostSpecificFirst(t *testing.T) {
 	for i, r := range Rates {
 		for j := 0; j < i; j++ {
