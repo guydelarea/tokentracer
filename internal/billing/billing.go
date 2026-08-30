@@ -62,10 +62,38 @@ func ContextWindow(model string) int64 {
 	if strings.Contains(normalized, "gpt-5.6") {
 		return 1_050_000
 	}
+	// Claude Code appends "[1m]" where the big window is opt-in, which is the
+	// only signal for a model whose bare id is 200k (Sonnet 4.5).
 	if strings.Contains(normalized, "[1m]") {
 		return 1_000_000
 	}
+	for _, key := range millionTokenModels {
+		if strings.Contains(normalized, key) {
+			return 1_000_000
+		}
+	}
 	return 200_000
+}
+
+// millionTokenModels are the Claude models that hold 1M tokens natively. From
+// Claude 4.6 on, the full window is the default AND the maximum, billed at
+// standard rates — so the bare id is already 1M and there is no "[1m]" to key
+// off. Reading one of these as 200k is not a rounding error: it draws a session
+// as five times as full as it is, and puts "compact now" on the screen at 40%.
+//
+// Matched as a substring, like a rate key, so route prefixes and the Bedrock and
+// Vertex spellings resolve off the same row. Deliberately NOT a bare "opus"/
+// "sonnet" family match: an older 200k sibling would inherit 1M and the gauge
+// would under-read instead, which is the same lie pointing the other way.
+var millionTokenModels = []string{
+	"claude-opus-4-6",
+	"claude-opus-4-7",
+	"claude-opus-4-8",
+	"claude-opus-5",
+	"claude-sonnet-4-6",
+	"claude-sonnet-5",
+	"claude-fable-5",
+	"claude-mythos-5",
 }
 
 // ReadPerTok is what one token costs to re-read out of the cached prefix — the

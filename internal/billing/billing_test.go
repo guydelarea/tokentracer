@@ -265,7 +265,29 @@ func TestContextWindow(t *testing.T) {
 		{"gpt-5.6-sol", 1_050_000},
 		{"gpt-5.6-terra", 1_050_000},
 		{"claude-opus-5[1m]", 1_000_000},
-		{"claude-sonnet-5", 200_000},
+		// Claude 4.6 and later carry the 1M window on the bare id, with no "[1m]"
+		// to key off. Reading these as 200k drew every current session as five
+		// times as full as it was.
+		{"claude-opus-5", 1_000_000},
+		{"claude-sonnet-5", 1_000_000},
+		{"claude-fable-5", 1_000_000},
+		{"claude-mythos-5", 1_000_000},
+		{"claude-opus-4-8", 1_000_000},
+		{"claude-opus-4-6", 1_000_000},
+		{"claude-sonnet-4-6", 1_000_000},
+		// Route prefixes and the gateway spellings resolve off the same key.
+		{"anthropic/claude-sonnet-5", 1_000_000},
+		{"anthropic.claude-opus-4-8-v1:0", 1_000_000},
+		{"claude-opus-5@20260601", 1_000_000},
+		// The 200k tiers, which must NOT inherit a sibling's window. Sonnet 4.5's
+		// 1M is opt-in, so only the "[1m]" spelling gets it.
+		{"claude-sonnet-4-5", 200_000},
+		{"claude-sonnet-4-5[1m]", 1_000_000},
+		{"claude-opus-4-5-20251101", 200_000},
+		{"claude-haiku-4-5", 200_000},
+		{"claude-3-7-sonnet-20250219", 200_000},
+		// Unknown model: the conservative window, never a guess at a bigger one.
+		{"some-new-model", 200_000},
 	}
 	for _, tt := range tests {
 		t.Run(tt.model, func(t *testing.T) {
@@ -294,10 +316,11 @@ func TestSeedTablePricesGPT56Usage(t *testing.T) {
 		wantWrite  float64
 		wantOutput float64
 	}{
-		{"gpt-5.6-sol", 5, 0.5, 6.25, 30},
-		{"gpt-5.6", 5, 0.5, 6.25, 30},
-		{"gpt-5.6-terra", 2.5, 0.25, 3.125, 15},
-		{"gpt-5.6-luna", 1, 0.1, 1.25, 6},
+		{"gpt-5.6-sol", 4, 0.4, 5, 20},
+		// "gpt-5.6" is the published alias for sol and must price identically.
+		{"gpt-5.6", 4, 0.4, 5, 20},
+		{"gpt-5.6-terra", 2, 0.2, 2.5, 12},
+		{"gpt-5.6-luna", 0.2, 0.02, 0.25, 1.2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.model, func(t *testing.T) {
@@ -375,30 +398,30 @@ func TestSeedTablePricesRealModelNames(t *testing.T) {
 	}
 }
 
-// The one dated price in the table. Sonnet 5's introductory rate ends on a
-// published date, and a session traced either side of it must bill at what it
-// actually cost — not at whichever number happened to be hard-coded.
-func TestSeedTableHonoursTheSonnet5IntroWindow(t *testing.T) {
+// Sonnet 5 launched at an introductory $2/$10 that Anthropic published as running
+// "through 2026-08-31", and this table once carried the scheduled increase to
+// $3/$15 as a [From, Until) pair. Anthropic then made $2/$10 the standard price
+// and cancelled the increase. This pins the cancellation: a rate that expires on
+// a date nobody re-checks is the one way a correct table silently goes wrong, and
+// past 2026-09-01 the old pair would have over-billed every Sonnet 5 session by 50%.
+func TestSeedTablePricesSonnet5AtTheStandardRateForever(t *testing.T) {
 	oneM := Usage{In: 1_000_000, Out: 1_000_000}
+	cancelledIncrease := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 
-	intro := Compute(Rates, "claude-sonnet-5", oneM, sonnet5StandardFrom.Add(-time.Hour))
-	if !intro.Priced {
-		t.Fatal("claude-sonnet-5 is unpriced inside the intro window")
+	for _, at := range []time.Time{
+		cancelledIncrease.Add(-time.Hour),
+		cancelledIncrease,
+		cancelledIncrease.AddDate(2, 0, 0),
+	} {
+		b := Compute(Rates, "claude-sonnet-5", oneM, at)
+		if !b.Priced {
+			t.Fatalf("claude-sonnet-5 is unpriced at %s", at)
+		}
+		closeTo(t, b.In, 2, "In at "+at.String())
+		closeTo(t, b.Out, 10, "Out at "+at.String())
 	}
-	closeTo(t, intro.In, 2, "intro In")
-	closeTo(t, intro.Out, 10, "intro Out")
-
-	std := Compute(Rates, "claude-sonnet-5", oneM, sonnet5StandardFrom)
-	if !std.Priced {
-		t.Fatal("claude-sonnet-5 is unpriced once the intro window closes — the standard row is missing")
-	}
-	closeTo(t, std.In, 3, "standard In")
-	closeTo(t, std.Out, 15, "standard Out")
 }
 
-// Ordering invariant: the seed table is sorted most-specific-key-first, so no
-// key may be a substring of a key that appears before it (that earlier, shorter
-// key would swallow every model the later one is meant to catch).
 func TestSeedTableOrderingIsMostSpecificFirst(t *testing.T) {
 	for i, r := range Rates {
 		for j := 0; j < i; j++ {
