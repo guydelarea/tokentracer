@@ -121,8 +121,22 @@ func EstTokens(bytes int64) int64 { return (bytes + 2) / 4 }
 // Rate is one price line: a model key, its per-million-token rates, and the
 // window in which they applied.
 type Rate struct {
-	// Key is matched as a substring against the normalized model name.
+	// Key is matched against the normalized model name — as a substring, unless
+	// Exact says otherwise.
 	Key string
+
+	// Exact narrows Key to whole-name matching. It is what lets a fetched price
+	// list be merged in without importing its bare family keys as substrings: the
+	// registry publishes a "gpt-4" row, and as a substring key that would price
+	// an unreleased "gpt-4-whatever" at gpt-4's rate instead of leaving it
+	// UNPRICED — the silent wrong number rates.go exists to prevent.
+	//
+	// Hand-written rows are substring-matched by default, which is what makes one
+	// key cover the Bedrock and Vertex spellings of the same model. A hand-written
+	// row sets this only where the key is an alias that would otherwise swallow
+	// its own variants — see the "gpt-5.6" row. billing.Merge sets it on every row
+	// it appends from a fetch.
+	Exact bool
 
 	// InPerM and OutPerM are USD per 1M tokens on the standard tier.
 	InPerM  float64
@@ -197,7 +211,7 @@ func Compute(rates []Rate, model string, u Usage, at time.Time) Bill {
 // window contains at. First hit wins, so Rates is ordered most-specific-first.
 func match(rates []Rate, model string, at time.Time) (Rate, bool) {
 	for _, r := range rates {
-		if !strings.Contains(model, r.Key) {
+		if !r.matches(model) {
 			continue
 		}
 		// A zero From is the zero time, which precedes any real timestamp.
@@ -210,6 +224,26 @@ func match(rates []Rate, model string, at time.Time) (Rate, bool) {
 		return r, true
 	}
 	return Rate{}, false
+}
+
+// matches reports whether r's key covers this already-normalized model name.
+//
+// A substring key is the hand-written default and the reason one row prices a
+// model however a gateway spelled it. An Exact key is the whole name, or the
+// segment after the last '/': a gateway puts its route in front of the model
+// ("anthropic/claude-sonnet-5"), and that prefix reaches the row whenever the
+// response never named the model it actually served.
+func (r Rate) matches(model string) bool {
+	if !r.Exact {
+		return strings.Contains(model, r.Key)
+	}
+	if model == r.Key {
+		return true
+	}
+	if i := strings.LastIndex(model, "/"); i >= 0 {
+		return model[i+1:] == r.Key
+	}
+	return false
 }
 
 // normalize rewrites a wire model name into the spelling the rate keys use, so

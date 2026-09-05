@@ -32,6 +32,11 @@ type Config struct {
 	// new; with several it is what lets a row say which API it went to, and what
 	// the provider filter is built from.
 	Upstreams []UpstreamView
+
+	// Rates is the price table the fold prices against. Nil means the embedded
+	// table, which is what every test and every failed startup refresh gets — and
+	// is why a refresh that does not happen changes nothing on this side.
+	Rates []billing.Rate
 }
 
 // UpstreamView is one configured route as the dashboard sees it.
@@ -72,7 +77,11 @@ type cachedTools struct {
 // are loopback-only — enforced here as well as by the listener's bind address,
 // because one line of defence for someone's API traffic is not enough.
 func Handler(st *store.Store, cfg Config) http.Handler {
-	s := &server{st: st, rates: billing.Rates, cfg: cfg, now: time.Now, tools: map[string]cachedTools{}}
+	rates := cfg.Rates
+	if rates == nil {
+		rates = billing.Rates
+	}
+	s := &server{st: st, rates: rates, cfg: cfg, now: time.Now, tools: map[string]cachedTools{}}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /dashboard", s.dashboard)
