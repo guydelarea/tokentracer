@@ -212,12 +212,14 @@ func TestLaunchBlocksForSeveralUpstreams(t *testing.T) {
 // proxy is, where the dashboard is, and a paste-ready command per client.
 func TestStartupScreen(t *testing.T) {
 	screen := startupScreen(config{Port: "8787", DBPath: "./tokentracer.db",
-		Routes: mustRoutes(t, "https://api.anthropic.com")}, ".env (applied)")
+		Routes: mustRoutes(t, "https://api.anthropic.com")}, ".env (applied)",
+		"42 models, embedded table (refresh off)")
 
 	for _, want := range []string{
 		"Proxy      http://localhost:8787 → https://api.anthropic.com",
 		"Dashboard  http://localhost:8787/dashboard",
 		"Database   ./tokentracer.db",
+		"Pricing    42 models, embedded table (refresh off)",
 		"Config     .env (applied)",
 		"Launch your agent through the proxy",
 		"\n  Claude Code\n  $ ANTHROPIC_BASE_URL=http://localhost:8787 claude\n",

@@ -1,15 +1,25 @@
 // Seeded from LiteLLM's community price registry, then kept current by hand
-// from Anthropic and OpenAI's published model pages.
+// from Anthropic and OpenAI's published model pages. This table is the
+// authority: it is the one that was checked against a vendor page by a person.
 //
 // Source: https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
 // OpenAI source: https://developers.openai.com/api/docs/pricing#text-tokens
 // Anthropic source: https://platform.claude.com/docs/en/about-claude/pricing
 // Generated: 2026-07-13, hand-verified against both vendor pages 2026-08-30
 //
+// At startup, internal/rates re-reads that registry and billing.Merge layers it
+// UNDERNEATH this table: a fetched row is kept only for a model no key here
+// covers, and only ever as an exact-match key. So the refresh can turn an
+// UNPRICED model into a priced one between releases, and can do nothing else. It
+// cannot move a price below, and it cannot restore a tier that was taken out of
+// this file — which matters, because the registry still publishes several that
+// were removed on purpose. Editing this table remains the way to correct a price.
+//
 // Hand-added rows come from the vendors' published list prices, not the registry,
 // which lags a model launch by weeks. A model that ships between regenerations is
-// the whole source of UNPRICED requests, so adding the row by hand is the fix —
-// but only ever with a price we can point at. A guess here is worse than a hole.
+// the whole source of UNPRICED requests, so adding the row by hand is still the
+// fix worth making — but only ever with a price we can point at. A guess here is
+// worse than a hole.
 //
 // Prices are USD per 1M tokens (the registry quotes per-token; these are x1e6).
 // Bedrock and Vertex spellings of Claude models are handled by normalize(), not
@@ -23,6 +33,9 @@
 // There are deliberately NO bare family fallbacks (no lone "sonnet" or "opus" key).
 // An unreleased model would silently inherit a sibling's price, and a wrong cost is
 // invisible; an unpriced one is a badge in the UI. Unknown model -> Priced:false.
+// The registry does publish bare family keys ("gpt-4", "gpt-5"), which is why
+// every row merged in from a fetch is exact-matched rather than trusted to be
+// specific — see Rate.Exact.
 //
 // From is the zero time on every row: these are current list prices and this project
 // has no verified price history. The [From, Until) machinery exists and is tested,
@@ -39,6 +52,9 @@
 // The GPT-5.6 family is the only long-context tier here: it prices the WHOLE
 // request at 2x input and 1.5x output once input passes 272K, which is what the
 // LongCtx* fields model. The machinery stays covered by synthetic-rate tests.
+// A long-context tier is only ever written here, by hand: internal/rates does not
+// map the registry's, precisely so that the above-200K rows this file dropped
+// cannot come back on the next boot.
 //
 // Published price modifiers deliberately NOT modelled here, because the facts
 // they key off are not on the row: Anthropic fast mode (Opus 5 / Opus 4.8 at

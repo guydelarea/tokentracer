@@ -14,3 +14,13 @@ This runs on the bytes headed for the database and nothing else. The client's st
 The proxy and the dashboard share one port, and the dashboard reads those captures back out. So `/dashboard`, `/api/stats` and `/api/capture` answer **404 to anything that is not this machine**, and the listener binds `127.0.0.1` besides. Two locks, because one is not enough for a file that holds every prompt you have ever sent.
 
 To reach the dashboard from elsewhere, forward the port over SSH — `ssh -L 8787:localhost:8787 devbox` — which keeps it loopback, and is what you want.
+
+## Outbound connections
+
+TokenTracer connects to the upstreams you configured, and to **one other host**: at startup it makes a single `GET` to a published price registry to fill gaps in its built-in rate table. It is worth being precise about it, because it is the only connection you did not ask for.
+
+- It sends a plain GET and nothing else — no request bodies, no model names, no session ids, no identifier of any kind. Nothing recorded in your database is involved, and nothing about your traffic leaves the machine.
+- It happens once, at startup, bounded to 3 seconds and 8 MB, and a failure is not fatal.
+- The response can only add prices for models the built-in table has no rate for. It cannot change a price, so a compromised or wrong registry cannot silently restate what your recorded traffic cost.
+
+`TOKENTRACER_RATES_URL=off` disables it, after which TokenTracer connects to nothing but your configured upstreams. See [Price refresh](configuration.md#price-refresh).

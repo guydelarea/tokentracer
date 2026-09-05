@@ -21,7 +21,9 @@ import (
 	"time"
 
 	"github.com/guydelarea/tokentracer/internal/api"
+	"github.com/guydelarea/tokentracer/internal/billing"
 	"github.com/guydelarea/tokentracer/internal/proxy"
+	"github.com/guydelarea/tokentracer/internal/rates"
 	"github.com/guydelarea/tokentracer/internal/record"
 	"github.com/guydelarea/tokentracer/internal/store"
 	"github.com/guydelarea/tokentracer/internal/upstream"
@@ -48,6 +50,12 @@ type config struct {
 	Port   string
 	Routes []upstream.Route
 	DBPath string
+
+	// Rates is the price table this process runs with: the embedded one plus
+	// whatever the startup refresh could fill in. Nil means the embedded table
+	// alone, which is what the tests construct and what every refresh failure
+	// falls back to.
+	Rates []billing.Rate
 }
 
 // Upstream is the first route's base URL — what a single-upstream install has
@@ -79,6 +87,59 @@ func loadConfig() (config, error) {
 		Routes: upstream.Dedupe(routes),
 		DBPath: env("TOKENTRACER_DB", "./tokentracer.db"),
 	}, nil
+}
+
+// ratesRefreshTimeout bounds the startup price refresh. Short on purpose:
+// nothing on the client's proxy path depends on prices, so a slow or wedged host
+// must cost the user a stale rate table, never a delayed "Ready".
+const ratesRefreshTimeout = 3 * time.Second
+
+// ratesURL is where the startup refresh reads prices from. "off" (or "none")
+// disables the fetch outright, which is the switch for an air-gapped machine or
+// anyone who would rather this binary made no connection it was not asked to.
+func ratesURL() string {
+	v := env("TOKENTRACER_RATES_URL", rates.DefaultURL)
+	if strings.EqualFold(v, "off") || strings.EqualFold(v, "none") {
+		return ""
+	}
+	return v
+}
+
+// refreshRates fills the gaps in the embedded price table from the published
+// list, and returns the table to run with plus the one line the startup screen
+// says about it.
+//
+// There is no error return because there is no decision for a caller to make: a
+// disabled refresh, an unreachable host and a corrupted document all mean the
+// same thing — run on the prices that were compiled in, and say which happened.
+// A price list is a convenience; the recorder's guarantee does not touch it.
+func refreshRates(url string) ([]billing.Rate, string) {
+	embedded := fmt.Sprintf("%d models, embedded table", len(billing.Rates))
+	if url == "" {
+		return billing.Rates, embedded + " (refresh off)"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), ratesRefreshTimeout)
+	defer cancel()
+
+	fetched, err := rates.Fetch(ctx, url)
+	if err != nil {
+		return billing.Rates, fmt.Sprintf("%s — refresh failed: %v", embedded, err)
+	}
+
+	merged := billing.Merge(billing.Rates, fetched)
+	filled := len(merged) - len(billing.Rates)
+	return merged, fmt.Sprintf("%d models — %d embedded, %d filled in from %s",
+		len(merged), len(billing.Rates), filled, hostOf(url))
+}
+
+// hostOf is the price list's host, for a startup line that names where this
+// process just connected without printing a URL the width of the terminal.
+func hostOf(raw string) string {
+	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return raw
 }
 
 // envFile is where the setup wizard saves its answer, next to the DB in cwd.
@@ -474,7 +535,7 @@ func setupHint() string {
 // and dashboard are, which config produced that answer, and the exact command
 // that launches each client through the proxy — ready to paste, not buried in
 // log lines.
-func startupScreen(cfg config, source string) string {
+func startupScreen(cfg config, source, pricing string) string {
 	var b strings.Builder
 	base := "http://localhost:" + cfg.Port
 
@@ -487,6 +548,7 @@ func startupScreen(cfg config, source string) string {
 	fmt.Fprintf(&b, "\n  Proxy      %s → %s\n", base, target)
 	fmt.Fprintf(&b, "  Dashboard  %s/dashboard\n", base)
 	fmt.Fprintf(&b, "  Database   %s\n", cfg.DBPath)
+	fmt.Fprintf(&b, "  Pricing    %s\n", pricing)
 	fmt.Fprintf(&b, "  Config     %s — change with `%s`\n", source, setupHint())
 
 	b.WriteString("\n  Ready. Launch your agent through the proxy — pick your client:\n")
@@ -604,7 +666,12 @@ func newApp(cfg config) (*app, error) {
 	}
 
 	port, _ := strconv.Atoi(cfg.Port)
-	dash := api.Handler(st, api.Config{Port: port, Upstream: cfg.Upstream(), Upstreams: upstreamViews(cfg.Routes)})
+	dash := api.Handler(st, api.Config{
+		Port:      port,
+		Upstream:  cfg.Upstream(),
+		Upstreams: upstreamViews(cfg.Routes),
+		Rates:     cfg.Rates,
+	})
 
 	// Everything that isn't ours belongs to the client's API call.
 	mux := http.NewServeMux()
@@ -667,6 +734,11 @@ func main() {
 		log.Fatalf("tokentracer: %v", err)
 	}
 
+	// Before the store opens: the merged table is process config, and newApp hands
+	// it straight to the dashboard.
+	table, pricing := refreshRates(ratesURL())
+	cfg.Rates = table
+
 	a, err := newApp(cfg)
 	if err != nil {
 		log.Fatalf("tokentracer: %v", err)
@@ -681,7 +753,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("tokentracer: %v", err)
 	}
-	fmt.Fprint(os.Stderr, startupScreen(cfg, configSource(fromShell)))
+	fmt.Fprint(os.Stderr, startupScreen(cfg, configSource(fromShell), pricing))
 
 	// Catch the signal before Serve, so a Ctrl-C during startup still takes the
 	// clean path.

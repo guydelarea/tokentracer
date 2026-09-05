@@ -59,6 +59,10 @@ internal/redact     credential shapes stripped from capture bytes only; the
                     client's live stream is never touched
 internal/billing    read-time pricing; rate table in rates.go (substring match
                     on model name, so route-prefixed names price correctly)
+internal/rates      startup price refresh: fetches a published registry and maps
+                    it to billing.Rate. billing.Merge layers it UNDER the table
+                    in rates.go — fills holes only, exact-match keys only, never
+                    overrides a hand-verified price. Failure is never fatal
 internal/store      SQLite: two tables — `requests` (facts) and `captures`
                     (gzipped request body + assembled response; deletable
                     without touching facts)
