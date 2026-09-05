@@ -23,7 +23,7 @@ To close that gap, startup makes one `GET` to a published price registry and use
 The fetch is bounded at 3 seconds and 8 MB, and **failure is never fatal** — an unreachable or malformed registry just means the built-in table, and the startup screen's `Pricing` line says which happened:
 
 ```
-  Pricing    28 models — 28 embedded, 3 filled in from raw.githubusercontent.com
+  Pricing    83 models — 28 embedded, 55 filled in from raw.githubusercontent.com
   Pricing    28 models, embedded table (refresh off)
   Pricing    28 models, embedded table — refresh failed: … no such host
 ```

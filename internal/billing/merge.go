@@ -23,6 +23,11 @@ import "sort"
 func Merge(embedded, fetched []Rate) []Rate {
 	filled := make([]Rate, 0, len(fetched))
 	for _, f := range fetched {
+		// Stored normalized, because match compares against a normalized model
+		// name. Every key in the published list is already in this form, so today
+		// this changes nothing — but a key that one day is not would otherwise
+		// never match anything, and would do it silently.
+		f.Key = normalize(f.Key)
 		if f.Key == "" || pricedByAny(embedded, f.Key) {
 			continue
 		}

@@ -138,11 +138,14 @@ func TestMergedTableKeepsTheOrderingInvariant(t *testing.T) {
 		if !r.Exact {
 			t.Errorf("merged[%d] %q is a fetched row that is not Exact", i, r.Key)
 		}
-		// A fetched row that is not exact would be shadowed by, or would shadow,
-		// an embedded key. Exact rows are immune, which is what makes appending safe.
-		for j := 0; j < len(Rates); j++ {
-			if strings.Contains(r.Key, Rates[j].Key) && !r.Exact {
-				t.Errorf("merged[%d] %q is shadowed by the embedded %q", i, r.Key, Rates[j].Key)
+		// Being exact is the whole defence: a fetched key that DOES contain an
+		// embedded one is fine, because it can only ever match its own full name.
+		// The same key left as a substring would be shadowed by that embedded row.
+		if !r.Exact {
+			for j := 0; j < len(Rates); j++ {
+				if strings.Contains(r.Key, Rates[j].Key) {
+					t.Errorf("merged[%d] %q is shadowed by the embedded %q", i, r.Key, Rates[j].Key)
+				}
 			}
 		}
 	}
