@@ -23,7 +23,9 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/guydelarea/tokentracer/internal/billing"
@@ -100,7 +102,7 @@ func Parse(doc []byte) ([]billing.Rate, error) {
 		if err := json.Unmarshal(blob, &e); err != nil {
 			continue
 		}
-		if r, ok := rateFor(name, e); ok {
+		if r, ok := rateFor(name, e, blob); ok {
 			out = append(out, r)
 		}
 	}
@@ -133,7 +135,7 @@ type entry struct {
 
 // rateFor turns one registry entry into a Rate, or reports that it must not
 // become one. Every rejection here leaves a model UNPRICED on purpose.
-func rateFor(name string, e entry) (billing.Rate, bool) {
+func rateFor(name string, e entry, blob json.RawMessage) (billing.Rate, bool) {
 	// A '/' is a gateway's spelling of a model ("vertex_ai/claude-opus-5"), and
 	// most of the registry's keys carry one. Dropping them loses nothing: the
 	// first-party key prices those already, because billing.normalize rewrites
@@ -161,12 +163,83 @@ func rateFor(name string, e entry) (billing.Rate, bool) {
 	// Exact is set again by billing.Merge, which is the seam that actually owns
 	// the guarantee. It is set here too so that a Rate from this package is never
 	// briefly a substring key in some future caller's hands.
-	return billing.Rate{
+	r := billing.Rate{
 		Key:     name,
 		InPerM:  *e.In * 1e6,
 		OutPerM: *e.Out * 1e6,
 		Exact:   true,
-	}, true
+	}
+	// A published tier is carried, but billing.Merge decides whether it may be
+	// applied: it refreshes the numbers on a model whose hand-written row already
+	// declares a tier, and never adds one to a model that does not. Whether a
+	// model HAS a premium tier stays a hand-verified fact — the list still
+	// publishes above-200k rows for the sonnet-4 family that were removed on
+	// purpose as a beta that no longer exists.
+	if threshold, in, out, ok := longCtx(blob); ok {
+		r.LongCtxThreshold, r.LongCtxInPerM, r.LongCtxOutPerM = threshold, in, out
+	}
+	return r, true
+}
+
+// tierField matches the field names that carry a long-context price. The
+// threshold is IN the name — "input_cost_per_token_above_272k_tokens" — so it
+// has to be read out of the key rather than a value. The anchors are what keep
+// the _flex, _priority and _batches spellings of the same field out: those price
+// service tiers this proxy cannot observe on a request.
+var tierField = regexp.MustCompile(`^(input|output)_cost_per_token_above_([0-9]+)k_tokens$`)
+
+// longCtx reads a complete published long-context tier out of one entry, in USD
+// per 1M tokens.
+//
+// "Complete" is the whole job. Half a tier is not a tier, and an input rate
+// above 272k paired with an output rate above 200k describes no threshold at
+// all — either would otherwise reprice a whole request off one published number
+// and one invented one.
+func longCtx(blob json.RawMessage) (threshold int64, in, out float64, ok bool) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(blob, &fields); err != nil {
+		return 0, 0, 0, false
+	}
+
+	type tier struct{ in, out float64 }
+	found := map[int64]*tier{}
+	for name, raw := range fields {
+		m := tierField.FindStringSubmatch(name)
+		if m == nil {
+			continue
+		}
+		k, err := strconv.ParseInt(m[2], 10, 64)
+		if err != nil {
+			return 0, 0, 0, false
+		}
+		var price float64
+		if json.Unmarshal(raw, &price) != nil || price <= 0 {
+			return 0, 0, 0, false
+		}
+		at := found[k*1000]
+		if at == nil {
+			at = &tier{}
+			found[k*1000] = at
+		}
+		if m[1] == "input" {
+			at.in = price * 1e6
+		} else {
+			at.out = price * 1e6
+		}
+	}
+
+	// More than one threshold in a single entry is a document we do not
+	// understand, not a choice to make.
+	if len(found) != 1 {
+		return 0, 0, 0, false
+	}
+	for k, t := range found {
+		if t.in <= 0 || t.out <= 0 {
+			return 0, 0, 0, false
+		}
+		return k, t.in, t.out, true
+	}
+	return 0, 0, 0, false
 }
 
 // multipliersHold reports whether billing's cache constants actually describe

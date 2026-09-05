@@ -127,10 +127,15 @@ func refreshRates(url string) ([]billing.Rate, string) {
 		return billing.Rates, fmt.Sprintf("%s — refresh failed: %v", embedded, err)
 	}
 
-	merged := billing.Merge(billing.Rates, fetched)
-	filled := len(merged) - len(billing.Rates)
-	return merged, fmt.Sprintf("%d models — %d embedded, %d filled in from %s",
-		len(merged), len(billing.Rates), filled, hostOf(url))
+	merged, stats := billing.Merge(billing.Rates, fetched)
+	line := fmt.Sprintf("%d models from %s — %d embedded, %d added",
+		len(merged), hostOf(url), len(billing.Rates), len(stats.Filled))
+	if n := len(stats.Repriced); n > 0 {
+		// Named, not just counted. A reprice restates what every recorded exchange
+		// on that model cost, so the one place it can be noticed is here.
+		line += fmt.Sprintf(", %d repriced (%s)", n, strings.Join(stats.Repriced, ", "))
+	}
+	return merged, line
 }
 
 // hostOf is the price list's host, for a startup line that names where this

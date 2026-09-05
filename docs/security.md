@@ -21,6 +21,8 @@ TokenTracer connects to the upstreams you configured, and to **one other host**:
 
 - It sends a plain GET and nothing else — no request bodies, no model names, no session ids, no identifier of any kind. Nothing recorded in your database is involved, and nothing about your traffic leaves the machine.
 - It happens once, at startup, bounded to 3 seconds and 8 MB, and a failure is not fatal.
-- The response can only add prices for models the built-in table has no rate for. It cannot change a price, so a compromised or wrong registry cannot silently restate what your recorded traffic cost.
+- **The response sets prices.** A published price for a model you have traffic on replaces the built-in one, and because cost is computed at read time that changes what your *existing* history is reported to have cost, not just new exchanges. A wrong or hostile registry can therefore misstate your spend. It cannot do anything else: it cannot reach your database, change a recorded fact, or add a rate tier the built-in table does not already declare — but the dollar figures are, by design, no longer purely local.
+
+The startup screen's `Pricing` line names every model whose price moved, so a change is visible on the run that makes it. If that trade is not one you want, turn the refresh off — the built-in table is hand-verified against vendor pages and works offline.
 
 `TOKENTRACER_RATES_URL=off` disables it, after which TokenTracer connects to nothing but your configured upstreams. See [Price refresh](configuration.md#price-refresh).

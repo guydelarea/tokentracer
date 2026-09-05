@@ -131,9 +131,11 @@ type Rate struct {
 	// an unreleased "gpt-4-whatever" at gpt-4's rate instead of leaving it
 	// UNPRICED — the silent wrong number rates.go exists to prevent.
 	//
-	// Hand-written rows stay substring-matched, which is what makes one key cover
-	// the Bedrock and Vertex spellings of the same model. Nothing in rates.go
-	// sets this; billing.Merge sets it on every row it takes from a fetch.
+	// Hand-written rows are substring-matched by default, which is what makes one
+	// key cover the Bedrock and Vertex spellings of the same model. A hand-written
+	// row sets this only where the key is an alias that would otherwise swallow
+	// its own variants — see the "gpt-5.6" row. billing.Merge sets it on every row
+	// it appends from a fetch.
 	Exact bool
 
 	// InPerM and OutPerM are USD per 1M tokens on the standard tier.

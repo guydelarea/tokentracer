@@ -7,19 +7,24 @@
 // Anthropic source: https://platform.claude.com/docs/en/about-claude/pricing
 // Generated: 2026-07-13, hand-verified against both vendor pages 2026-08-30
 //
-// At startup, internal/rates re-reads that registry and billing.Merge layers it
-// UNDERNEATH this table: a fetched row is kept only for a model no key here
-// covers, and only ever as an exact-match key. So the refresh can turn an
-// UNPRICED model into a priced one between releases, and can do nothing else. It
-// cannot move a price below, and it cannot restore a tier that was taken out of
-// this file — which matters, because the registry still publishes several that
-// were removed on purpose. Editing this table remains the way to correct a price.
+// At startup, internal/rates re-reads that registry and billing.Merge brings this
+// table up to date from it: a row here whose model the list also prices takes the
+// published numbers, and a model no key here covers is appended as an exact-match
+// row. Because cost is computed at read time, a price that moves corrects history
+// as well as new traffic — which is the whole reason there is no cost column.
 //
-// Hand-added rows come from the vendors' published list prices, not the registry,
-// which lags a model launch by weeks. A model that ships between regenerations is
-// the whole source of UNPRICED requests, so adding the row by hand is still the
-// fix worth making — but only ever with a price we can point at. A guess here is
-// worse than a hole.
+// What the list may never do is decide how this table is KEYED. A reprice moves
+// numbers onto the row below and touches nothing else: not the key, not its
+// matching mode, not its rate window, and not whether the model has a
+// long-context tier. That last one is load-bearing — the registry still publishes
+// above-200K rows for the sonnet-4 family that this file deleted as a beta that
+// no longer exists, and without the rule they would return on every boot.
+//
+// So the prices below are no longer the last word on cost, but the SHAPE of this
+// table still is, and it is still the only thing a person has checked against a
+// vendor page. Adding a row by hand remains the right fix for a model that ships
+// between releases — but only ever with a price we can point at. A guess here is
+// worse than a hole. Set TOKENTRACER_RATES_URL=off to run on these numbers alone.
 //
 // Prices are USD per 1M tokens (the registry quotes per-token; these are x1e6).
 // Bedrock and Vertex spellings of Claude models are handled by normalize(), not
@@ -74,14 +79,17 @@ var Rates = []Rate{
 	{Key: "gpt-5.6-terra", InPerM: 2, OutPerM: 12, LongCtxThreshold: 272_000, LongCtxInPerM: 4, LongCtxOutPerM: 18},
 	{Key: "gpt-5.6-luna", InPerM: 0.2, OutPerM: 1.2, LongCtxThreshold: 272_000, LongCtxInPerM: 0.4, LongCtxOutPerM: 1.8},
 	{Key: "gpt-5.6-sol", InPerM: 4, OutPerM: 20, LongCtxThreshold: 272_000, LongCtxInPerM: 8, LongCtxOutPerM: 30},
-	// KNOWN EXCEPTION to the no-bare-family-fallback rule below. "gpt-5.6" is a
-	// published alias for sol, so it earns a row — but it is matched as a
-	// substring like every other key, so an unreleased "gpt-5.6-pro" would
-	// silently inherit sol's price instead of coming out UNPRICED (gpt-5.5-pro
-	// is $30/$180 against gpt-5.5's $5/$30, so the error would be large). The
-	// ordering test cannot catch this: it compares keys to keys, never model
-	// names to keys. Delete this row if a variant ships that it would swallow.
-	{Key: "gpt-5.6", InPerM: 4, OutPerM: 20, LongCtxThreshold: 272_000, LongCtxInPerM: 8, LongCtxOutPerM: 30},
+	// "gpt-5.6" is a published alias for sol, so it earns a row. As a bare family
+	// key it swallowed every variant shipping under the name, which this file
+	// predicted and asked to have fixed the moment one did — and one has:
+	// gpt-5.6-cyber is $12.50/$75 and was billed at sol's $4/$20, a third of its
+	// price, until this row was pinned to Exact.
+	//
+	// Exact is what the no-bare-family-fallback rule below always wanted. The
+	// alias now prices itself and nothing else, and a variant this table does not
+	// know comes out UNPRICED — or is filled in by the startup refresh, which is
+	// where gpt-5.6-cyber's real price comes from.
+	{Key: "gpt-5.6", Exact: true, InPerM: 4, OutPerM: 20, LongCtxThreshold: 272_000, LongCtxInPerM: 8, LongCtxOutPerM: 30},
 	{Key: "claude-3-7-sonnet-20250219", InPerM: 3, OutPerM: 15},
 	{Key: "claude-sonnet-4-5-20250929", InPerM: 3, OutPerM: 15},
 	{Key: "claude-haiku-4-5-20251001", InPerM: 1, OutPerM: 5},

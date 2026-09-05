@@ -68,8 +68,8 @@ func TestRefreshRatesFillsHolesAndNamesTheHost(t *testing.T) {
 	if len(table) != len(billing.Rates)+1 {
 		t.Fatalf("table = %d rows, want the embedded %d plus one", len(table), len(billing.Rates)+1)
 	}
-	if !strings.Contains(line, "1 filled in from "+hostOf(srv.URL)) {
-		t.Errorf("startup line = %q, want it to name the host it fetched from", line)
+	if !strings.Contains(line, hostOf(srv.URL)) || !strings.Contains(line, "1 added") {
+		t.Errorf("startup line = %q, want it to name the host and the model it added", line)
 	}
 	if got := billing.Compute(table, model, billing.Usage{In: 1_000_000}, epochForTest); !got.Priced {
 		t.Errorf("%s still UNPRICED after a successful refresh", model)
@@ -89,5 +89,27 @@ func TestRatesURLCanBeTurnedOff(t *testing.T) {
 	t.Setenv("TOKENTRACER_RATES_URL", "https://example.invalid/prices.json")
 	if got := ratesURL(); got != "https://example.invalid/prices.json" {
 		t.Errorf("ratesURL = %q, want the override", got)
+	}
+}
+
+// A reprice restates what every recorded exchange on that model cost. The
+// startup line is the only place the user can notice it, so it names the model
+// rather than just counting it.
+func TestRefreshRatesNamesWhatItRepriced(t *testing.T) {
+	// claude-sonnet-5 is in the embedded table at $2/$10; publish it cheaper.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"claude-sonnet-5":{"litellm_provider":"anthropic","mode":"chat",
+			"input_cost_per_token":0.000001,"output_cost_per_token":0.000005}}`))
+	}))
+	defer srv.Close()
+
+	table, line := refreshRates(srv.URL)
+
+	if !strings.Contains(line, "1 repriced (claude-sonnet-5)") {
+		t.Errorf("startup line = %q, want it to name the repriced model", line)
+	}
+	got := billing.Compute(table, "claude-sonnet-5", billing.Usage{In: 100_000}, epochForTest)
+	if want := 100_000.0 / 1e6 * 1; got.In != want {
+		t.Errorf("in = $%v, want $%v — the published price did not reach the running table", got.In, want)
 	}
 }

@@ -267,3 +267,66 @@ func TestFetchFailsLoudlyRatherThanPartially(t *testing.T) {
 		}
 	})
 }
+
+// The long-context threshold is in the FIELD NAME, not a value, so it has to be
+// read out of the key. billing.Merge decides whether it may be applied.
+func TestParseReadsACompleteLongContextTier(t *testing.T) {
+	got := mustParse(t, doc(`"gpt-9":{"litellm_provider":"openai","mode":"chat",
+		"input_cost_per_token":0.000004,"output_cost_per_token":0.00002,
+		"input_cost_per_token_above_272k_tokens":0.000008,
+		"output_cost_per_token_above_272k_tokens":0.00003}`))
+
+	if len(got) != 1 {
+		t.Fatalf("rates = %v, want one", keys(got))
+	}
+	r := got[0]
+	if r.LongCtxThreshold != 272_000 || r.LongCtxInPerM != 8 || r.LongCtxOutPerM != 30 {
+		t.Errorf("tier = %d/%v/%v, want 272000 at 8/30 per 1M",
+			r.LongCtxThreshold, r.LongCtxInPerM, r.LongCtxOutPerM)
+	}
+}
+
+// Half a tier would reprice a whole request off one published number and one
+// invented one, and two halves that disagree about where the tier starts
+// describe no threshold at all.
+func TestParseIgnoresAnIncompleteLongContextTier(t *testing.T) {
+	cases := []struct{ name, fields string }{
+		{"input only", `"input_cost_per_token_above_272k_tokens":0.000008`},
+		{"output only", `"output_cost_per_token_above_272k_tokens":0.00003`},
+		{"thresholds disagree", `"input_cost_per_token_above_272k_tokens":0.000008,
+			"output_cost_per_token_above_200k_tokens":0.00003`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := mustParse(t, doc(`"gpt-9":{"litellm_provider":"openai","mode":"chat",
+				"input_cost_per_token":0.000004,"output_cost_per_token":0.00002,`+c.fields+`}`))
+
+			if len(got) != 1 {
+				t.Fatalf("rates = %v, want the row itself kept", keys(got))
+			}
+			if got[0].LongCtxThreshold != 0 {
+				t.Errorf("tier = %d, want none — half a tier is not a tier", got[0].LongCtxThreshold)
+			}
+		})
+	}
+}
+
+// The list spells the same field several ways for service tiers this proxy
+// cannot observe on a request — flex, priority, batch. Reading one as the
+// standard long-context rate would price every large request at the wrong tier.
+func TestParseIgnoresServiceTierSpellingsOfTheLongContextFields(t *testing.T) {
+	got := mustParse(t, doc(`"gpt-9":{"litellm_provider":"openai","mode":"chat",
+		"input_cost_per_token":0.000004,"output_cost_per_token":0.00002,
+		"input_cost_per_token_above_272k_tokens_flex":0.000004,
+		"output_cost_per_token_above_272k_tokens_flex":0.000015,
+		"input_cost_per_token_above_272k_tokens_priority":0.000016,
+		"output_cost_per_token_above_272k_tokens_priority":0.00006}`))
+
+	if len(got) != 1 {
+		t.Fatalf("rates = %v, want one", keys(got))
+	}
+	if got[0].LongCtxThreshold != 0 {
+		t.Errorf("tier = %d at %v/%v, want none — those are flex and priority rates",
+			got[0].LongCtxThreshold, got[0].LongCtxInPerM, got[0].LongCtxOutPerM)
+	}
+}

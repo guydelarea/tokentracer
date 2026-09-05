@@ -14,18 +14,23 @@ Environment variables, or `KEY=value` lines in `./.env` (written by the first-ru
 
 Prices live in a table compiled into the binary, hand-verified against Anthropic's and OpenAI's published pages. A model that ships after your build is not in it, and its requests show up as **unpriced** rather than at a guessed rate.
 
-To close that gap, startup makes one `GET` to a published price registry and uses it to **fill holes only**:
+To close that gap, startup makes one `GET` to a published price registry and brings the table up to date from it. Two different things happen:
 
-- A model the built-in table already prices is left alone. The fetch can never move a verified price, and can never restore a rate tier that was removed on purpose.
-- A model it does not price is added, matched on its exact name — the registry publishes bare family keys like `gpt-4`, and matching those loosely would price an unreleased `gpt-4-…` at the wrong rate instead of flagging it unpriced.
-- Rows whose published cache discounts disagree with the multipliers TokenTracer bills at are skipped, not imported at a rate that would be wrong.
+- **Reprice.** A model the built-in table already knows takes the published price. Because cost is computed at read time, this corrects **history as well as new traffic** — the same property that lets a corrected rate table fix the past instead of rewriting it.
+- **Add.** A model the table has no rate for is appended, matched on its **exact** name. The registry publishes bare family keys like `gpt-4`, and matching those loosely would price an unreleased `gpt-4-…` at the wrong rate instead of flagging it unpriced.
 
-The fetch is bounded at 3 seconds and 8 MB, and **failure is never fatal** — an unreachable or malformed registry just means the built-in table, and the startup screen's `Pricing` line says which happened:
+What the registry may **not** do is change how the table is keyed:
+
+- It cannot add a rate tier. Whether a model has a long-context premium stays hand-verified — the registry still publishes above-200K tiers for models that dropped them, and they would otherwise return on every boot. A tier the table already declares does get its numbers refreshed.
+- It cannot drop a verified tier either, so GPT-5.6 above 272K keeps pricing correctly even if a published row omits it.
+- Rows whose published cache discounts disagree with the multipliers TokenTracer bills at are skipped entirely, rather than imported at a price it would then bill wrongly.
+
+The fetch is bounded at 3 seconds and 8 MB, and **failure is never fatal** — an unreachable or malformed registry just means the built-in table. The `Pricing` line says exactly what happened, and **names every model whose price moved**:
 
 ```
-  Pricing    83 models — 28 embedded, 55 filled in from raw.githubusercontent.com
+  Pricing    84 models from raw.githubusercontent.com — 28 embedded, 56 added, 1 repriced (gpt-5.6)
   Pricing    28 models, embedded table (refresh off)
   Pricing    28 models, embedded table — refresh failed: … no such host
 ```
 
-Set `TOKENTRACER_RATES_URL=off` to make TokenTracer connect to nothing but your configured upstreams.
+Set `TOKENTRACER_RATES_URL=off` to pin prices to the built-in table and make TokenTracer connect to nothing but your configured upstreams. See [Outbound connections](security.md#outbound-connections) for what repricing means for trust.
