@@ -54,11 +54,20 @@ func CacheTTLFor(model string) time.Duration {
 // An unpriced model gets the default multiplier. Its costs are zero, so the
 // shares only ever multiply zero; they are not a guess at its price.
 func RebillShares(rates []Rate, model string, at time.Time) (write, fresh float64) {
-	m := ReadMult
-	if r, ok := match(rates, normalize(model), at); ok {
-		m = r.readMult()
-	}
+	m, _ := ReadMultFor(rates, model, at)
 	return 1 - m/Write5mMult, 1 - m
+}
+
+// ReadMultFor is the multiplier a cache read of this model bills at, as a share
+// of its input rate — the number the page prints next to a request's cache-read
+// lane. ok is false when the model has no rate; m is then the default, which
+// labels nothing, because an unpriced request has no billed multiplier to show.
+func ReadMultFor(rates []Rate, model string, at time.Time) (m float64, ok bool) {
+	r, ok := match(rates, normalize(model), at)
+	if !ok {
+		return ReadMult, false
+	}
+	return r.readMult(), true
 }
 
 // ContextWindow is how many tokens the model will hold — the denominator of the

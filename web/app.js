@@ -109,6 +109,8 @@
  * @property {tokens} tok
  * @property {costs} cost
  * @property {boolean} priced
+ * @property {number} [readMult] what this request's cache reads billed at, as a
+ *   share of its input rate (0.1, 0.05, 0.025); omitempty, absent when unpriced
  * @property {shape} shape
  * @property {byteSplit} bytes
  * @property {string} [errType] omitempty
@@ -646,9 +648,9 @@ function renderHome() {
     : 'no unused schemas in live sessions';
 
   var hitNow = ov.hitNow || 0, hitAvg = ov.hitAvg || 0, hitSub;
-  if (!D.traced) hitSub = 'cache reads bill at 0.1× fresh input';
+  if (!D.traced) hitSub = 'cache reads bill at 0.1× fresh input or less';
   else if (hitNow < hitAvg - 0.06) hitSub = '▾ vs ' + (hitAvg * 100).toFixed(0) + '% lifetime — uncached input bills at 1×';
-  else hitSub = 'lifetime ' + (hitAvg * 100).toFixed(0) + '% · cache reads bill at 0.1×';
+  else hitSub = 'lifetime ' + (hitAvg * 100).toFixed(0) + '% · cache reads bill at ≤0.1×';
 
   var reqHr = ov.reqHr || 0, winReqs = ov.winReqs || 0;
   var reqSub = winReqs + (winReqs === 1 ? ' request' : ' requests') + ' in the ' + winCap + ' · ' + fM(ov.avgReq || 0, 4) + ' avg';
@@ -1123,7 +1125,7 @@ function histCards(span, prev, peak) {
       'Cache hit ' + (hitPrev > 0
         ? (hitNow >= hitPrev ? 'up from ' : 'down from ') + Math.round(hitPrev * 100) + '% the ' + histPeriod() + ' before'
         : 'across the range'),
-      'Cache reads bill at 0.1× fresh input — the gap between these bars is mostly this number.'],
+      'Cache reads bill at 0.1× fresh input or less — the gap between these bars is mostly this number.'],
     ['rhythm', MIN, fUsd(perDay(cost[bi], days[bi])) + '/day',
       dstr(bt, { weekday: 'long' }) + 's are the heaviest day',
       'Averaged over the ' + fC(H.length) + (H.length === 1 ? ' day' : ' days') + ' that recorded anything.']
@@ -1779,6 +1781,15 @@ function traceRow(q, i, maxMs) {
     '<span class="r">' + cost + '</span></div>';
 }
 
+/* The cache-read multiplier this request actually billed at, from the same rate
+   that produced the cost beside it. The page never assumes one: Opus 5.5 reads
+   at 0.05× and Fable 5.2 at 0.025×. An unpriced request billed nothing, so it
+   names no multiplier rather than a made-up one. */
+/** @param {reqRow} q @returns {string} */
+function readMultTxt(q) {
+  return q.priced && q.readMult ? (+q.readMult.toPrecision(3)) + '×' : '';
+}
+
 /** One line of an unfolded row's breakdown: swatch, name, and two right-aligned figures. */
 /** @param {string} color @param {string} label @param {string} a @param {string} b @returns {string} */
 function qxLane(color, label, a, b) {
@@ -1820,7 +1831,7 @@ function traceDetail(q, e) {
     h += '<div style="margin:10px 0 4px"><span class="badge unp">unpriced</span></div>';
   }
   h += '<div style="margin-top:6px">' +
-    qxLane(MRD, 'cache read · 0.1×', fT(t.read), q.priced ? fM(c.read || 0, 4) : '—') +
+    qxLane(MRD, 'cache read' + (readMultTxt(q) ? ' · ' + readMultTxt(q) : ''), fT(t.read), q.priced ? fM(c.read || 0, 4) : '—') +
     qxLane(MIN, 'fresh input · 1×', fT(t.in), q.priced ? fM(c.in || 0, 4) : '—') +
     qxLane(MWR, 'cache write · 1.25×', fT(t.write), q.priced ? fM(c.write || 0, 4) : '—') +
     qxLane(MOU, 'output', fT(t.out), q.priced ? fM(c.out || 0, 4) : '—') +
@@ -1862,7 +1873,9 @@ function traceDetail(q, e) {
       '<span class="chip" style="color:' + cacheColor(e) + ';border-color:rgba(255,255,255,0.14)">' + esc(e.class) + '</span>' +
       (e.rebill ? '<span class="m" style="font-size:11px;color:' + MER + '">' + fUsd(e.rebill) + ' re-billed</span>' : '') + '</div>' +
       '<div style="margin-top:9px;font-size:11.5px;color:#9f9f9f;line-height:1.55">' +
-      esc(e.class === 'hit' ? 'the cached prefix matched — history billed at 0.1×' : causeText(e)) + '</div>';
+      esc(e.class === 'hit'
+        ? 'the cached prefix matched — history billed ' + (readMultTxt(q) ? 'at ' + readMultTxt(q) : 'as a cache read')
+        : causeText(e)) + '</div>';
     if (e.gapMs > 1000) h += '<div class="note" style="margin-top:7px">idle ' + esc(dur(e.gapMs)) + ' before this request</div>';
   }
   var rest = Math.max(0, (q.ms || 0) - (q.ttft || 0));
@@ -2016,7 +2029,7 @@ function billingTab(q) {
   var c = q.cost, t = q.tok, i;
   /** @type {[string, string, number, number][]} colour, label, tokens, cost */
   var lanes = [
-    [MRD, 'cache read · billed at 0.1×', t.read || 0, c.read || 0],
+    [MRD, 'cache read' + (readMultTxt(q) ? ' · billed at ' + readMultTxt(q) : ''), t.read || 0, c.read || 0],
     [MIN, 'fresh input · 1×', t.in || 0, c.in || 0],
     [MWR, 'cache write · 1.25×', t.write || 0, c.write || 0],
     [MOU, 'output', t.out || 0, c.out || 0]
