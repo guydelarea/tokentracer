@@ -245,9 +245,9 @@ func longCtx(blob json.RawMessage) (threshold int64, in, out float64, ok bool) {
 // multipliersHold reports whether billing's cache constants actually describe
 // this model's published cache rates.
 //
-// billing applies ReadMult, Write5mMult and Write1hMult to every model as
-// package constants, on the strength of them holding for every hand-verified
-// row. Across the registry they hold for barely half the chat models: gpt-4o
+// billing applies ReadMult, Write5mMult and Write1hMult to every model it has
+// no hand-verified multiplier for — and a fetched row is exactly such a model:
+// Rate.CacheReadMult is only ever written by hand. Across the registry they hold for barely half the chat models: gpt-4o
 // reads at 0.5x its input rate and the gpt-4.1 family at 0.25x, against the 0.1x
 // assumed here. Importing such a row would misprice its cache reads — the token
 // category that dominates agent traffic — by several times, and silently.

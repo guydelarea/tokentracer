@@ -174,7 +174,8 @@ func TestTraceNamesWhatBrokeTheCache(t *testing.T) {
 			}
 
 			// And what it cost: everything above what a hit would have billed.
-			wantRebill := v.Rows[2].Cost.Write * billing.RebillWriteShare
+			share, _ := billing.RebillShares(testRates, v.Model, now)
+			wantRebill := v.Rows[2].Cost.Write * share
 			close(t, "rebill", got.Rebill, wantRebill)
 			if v.Breaks != 1 {
 				t.Errorf("breaks = %d, want 1", v.Breaks)

@@ -5,7 +5,8 @@
 // Source: https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
 // OpenAI source: https://developers.openai.com/api/docs/pricing#text-tokens
 // Anthropic source: https://platform.claude.com/docs/en/about-claude/pricing
-// Generated: 2026-07-13, hand-verified against both vendor pages 2026-08-30
+// Generated: 2026-07-13, hand-verified against both vendor pages 2026-08-30;
+// the Claude 5.1/5.2/5.5 rows hand-verified against the Anthropic page 2026-11-22.
 //
 // At startup, internal/rates re-reads that registry and billing.Merge brings this
 // table up to date from it: a row here whose model the list also prices takes the
@@ -49,21 +50,29 @@
 // Anthropic has since made $2/$10 the standard price and cancelled the increase
 // that was scheduled for 2026-09-01, so the window is gone rather than expired.
 //
-// Long-context tiers: NO Claude model has one. Claude 4.6 and later ship a 1M
-// window at standard rates, and every earlier model tops out at 200k, so there is
-// no window in which a premium could apply. The registry's above-200K rates for
+// Long-context tiers: exactly one Claude model has one, Haiku 5.5, which prices
+// the WHOLE request at $0.50/$2.50 once its prompt passes 100,000 tokens — cache
+// reads and writes count toward the prompt, which is how LongCtxThreshold
+// already counts it. Every other Claude 4.6 and later model ships a 1M window
+// at standard rates, and every earlier model tops out at 200k, so there is no
+// window in which a premium could apply. The registry's above-200K rates for
 // the sonnet-4 family described a beta that no longer exists; carrying them
 // asserted a tier the vendor has stopped publishing and no request could reach.
-// The GPT-5.6 family is the only long-context tier here: it prices the WHOLE
+// The GPT-5.6 family is the other long-context tier here: it prices the WHOLE
 // request at 2x input and 1.5x output once input passes 272K, which is what the
 // LongCtx* fields model. The machinery stays covered by synthetic-rate tests.
 // A long-context tier is only ever written here, by hand: internal/rates does not
 // map the registry's, precisely so that the above-200K rows this file dropped
 // cannot come back on the next boot.
 //
+// Cache-read discounts that depart from 0.1x ARE modelled, per row, because the
+// fact they key off — the model — is on the row: Opus 5.5 and Sonnet 5.5 read
+// at 0.05x, Fable/Mythos 5.1 and 5.2 at 0.025x (CacheReadMult). Writes are
+// 1.25x/2x on every Claude row, Haiku 5.5's long-context tier included.
+//
 // Published price modifiers deliberately NOT modelled here, because the facts
-// they key off are not on the row: Anthropic fast mode (Opus 5 / Opus 4.8 at
-// $10/$50 on speed:"fast"), US-pinned inference (inference_geo:"us", 1.1x on
+// they key off are not on the row: Anthropic fast mode (Fable/Mythos 5.2 at
+// $16/$80, Opus 5.5 at $8/$40, Opus 5 / Opus 4.8 at $10/$50 on speed:"fast"), US-pinned inference (inference_geo:"us", 1.1x on
 // every category for 4.6+), OpenAI's own fast mode, and both vendors' 50% batch
 // discount. Each would need capturing before it could be priced. Until then such
 // an exchange is reported at the standard rate — under-billed for the premiums,
@@ -113,6 +122,19 @@ var Rates = []Rate{
 	{Key: "claude-opus-4-6", InPerM: 5, OutPerM: 25},
 	{Key: "claude-opus-4-7", InPerM: 5, OutPerM: 25},
 	{Key: "claude-opus-4-8", InPerM: 5, OutPerM: 25},
+	// The point releases of the 5 family. Each must sort before its family's
+	// bare key, which as a substring would otherwise swallow it: until these rows
+	// existed, Opus 5.5 billed as Opus 5 ($5/$25, reads 0.1x) against a real
+	// $4/$20 with reads at 0.05x, and Fable 5.1 billed its cache reads at 4x.
+	{Key: "claude-mythos-5-2", InPerM: 8, OutPerM: 40, CacheReadMult: 0.025},
+	{Key: "claude-mythos-5-1", InPerM: 10, OutPerM: 50, CacheReadMult: 0.025},
+	{Key: "claude-sonnet-5-5", InPerM: 2, OutPerM: 10, CacheReadMult: 0.05},
+	{Key: "claude-fable-5-2", InPerM: 8, OutPerM: 40, CacheReadMult: 0.025},
+	{Key: "claude-fable-5-1", InPerM: 10, OutPerM: 50, CacheReadMult: 0.025},
+	{Key: "claude-opus-5-5", InPerM: 4, OutPerM: 20, CacheReadMult: 0.05},
+	// "Over 100,000 tokens" is strictly above, which is how Compute reads a
+	// threshold. Reads stay 0.1x on both tiers ($0.01, then $0.05).
+	{Key: "claude-haiku-5-5", InPerM: 0.10, OutPerM: 0.50, LongCtxThreshold: 100_000, LongCtxInPerM: 0.50, LongCtxOutPerM: 2.50},
 	{Key: "claude-mythos-5", InPerM: 10, OutPerM: 50},
 	{Key: "claude-sonnet-5", InPerM: 2, OutPerM: 10},
 	{Key: "claude-fable-5", InPerM: 10, OutPerM: 50},
