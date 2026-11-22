@@ -137,6 +137,20 @@ func TestMergeRepriceDoesNotChangeKeying(t *testing.T) {
 	}
 }
 
+// A hand-verified cache-read discount is part of the row's shape, not its
+// price list: a reprice moves input and output and leaves it alone. Losing it
+// would put Opus 5.5's reads back at 0.1x — double what the vendor charges — on
+// the first boot that saw the registry move its input rate.
+func TestMergeRepriceKeepsTheCacheReadMultiplier(t *testing.T) {
+	embedded := []Rate{{Key: "claude-opus-5-5", InPerM: 4, OutPerM: 20, CacheReadMult: 0.05}}
+	published := []Rate{{Key: "claude-opus-5-5", Exact: true, InPerM: 3, OutPerM: 15}}
+
+	got := mergeOf(t, embedded, published)[0]
+	if got.InPerM != 3 || got.CacheReadMult != 0.05 {
+		t.Errorf("row = %+v, want repriced to $3 with reads still at 0.05x", got)
+	}
+}
+
 // A model the embedded table has no opinion about is what the refresh adds.
 func TestMergeFillsAHole(t *testing.T) {
 	const model = "claude-neue-9-20270101"

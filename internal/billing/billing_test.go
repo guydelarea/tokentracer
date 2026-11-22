@@ -458,3 +458,113 @@ func TestSeedTableOrderingIsMostSpecificFirst(t *testing.T) {
 		}
 	}
 }
+
+// published is one row of Anthropic's model pricing table, USD per 1M tokens, in
+// the page's own column order: base input, 5m write, 1h write, cache hit, output.
+type published struct{ in, w5m, w1h, read, out float64 }
+
+// The 5 family's point releases, priced off the vendor page
+// (platform.claude.com/docs/en/about-claude/pricing, read 2026-11-22) column by
+// column. Every one of these was mispriced by its family's bare key before it
+// had a row: Opus 5.5 at Opus 5's $5/$25, Fable 5.2 at Fable 5's $10/$50, and
+// all six at a 0.1x cache read the vendor does not charge. The bare keys are
+// pinned alongside so the new rows cannot have moved them.
+func TestSeedTablePricesEachFivePointReleaseAtItsOwnRate(t *testing.T) {
+	cases := map[string]published{
+		"claude-opus-5-5":   {4, 5, 8, 0.20, 20},
+		"claude-sonnet-5-5": {2, 2.50, 4, 0.10, 10},
+		"claude-fable-5-2":  {8, 10, 16, 0.20, 40},
+		"claude-mythos-5-2": {8, 10, 16, 0.20, 40},
+		"claude-fable-5-1":  {10, 12.50, 20, 0.25, 50},
+		"claude-mythos-5-1": {10, 12.50, 20, 0.25, 50},
+		"claude-opus-5":     {5, 6.25, 10, 0.50, 25},
+		"claude-sonnet-5":   {2, 2.50, 4, 0.20, 10},
+		"claude-fable-5":    {10, 12.50, 20, 1, 50},
+		"claude-mythos-5":   {10, 12.50, 20, 1, 50},
+		// The spellings that reach the proxy must land on the same row.
+		"claude-opus-5-5[1m]":            {4, 5, 8, 0.20, 20},
+		"claude-opus-5-5@20261101":       {4, 5, 8, 0.20, 20},
+		"anthropic.claude-opus-5-5-v1:0": {4, 5, 8, 0.20, 20},
+		"anthropic/claude-sonnet-5-5":    {2, 2.50, 4, 0.10, 10},
+	}
+	for model, p := range cases {
+		t.Run(model, func(t *testing.T) {
+			assertPublished(t, model, p, 1_000_000)
+		})
+	}
+}
+
+// normalize writes Vertex's '@' as '-', so a dated Fable 5 snapshot arrives as
+// "claude-fable-5-20260601" — which contains "claude-fable-5-2" as a plain
+// substring. Without the digit boundary in containsKey, adding the Fable 5.2 row
+// would have quietly repriced every dated Fable 5 / Mythos 5 request at 5.2's
+// rates. This is the regression that boundary exists for.
+func TestDatedSnapshotIsNotSwallowedByAPointReleaseKey(t *testing.T) {
+	for model, p := range map[string]published{
+		"claude-fable-5@20260601":  {10, 12.50, 20, 1, 50},
+		"claude-mythos-5@20260601": {10, 12.50, 20, 1, 50},
+		"claude-opus-5@20260601":   {5, 6.25, 10, 0.50, 25},
+	} {
+		t.Run(model, func(t *testing.T) { assertPublished(t, model, p, 1_000_000) })
+	}
+}
+
+// Haiku 5.5 is the one Claude model priced by prompt length. "Over 100,000
+// tokens" counts every input token, cache reads and writes included, and the
+// whole request moves to the higher prices — so 4 x 25,000 sits exactly on the
+// boundary and is standard, and one more token reprices all of it.
+func TestSeedTablePricesHaiku55ByPromptLength(t *testing.T) {
+	assertPublished(t, "claude-haiku-5-5", published{0.10, 0.125, 0.20, 0.01, 0.50}, 25_000)
+	assertPublished(t, "claude-haiku-5-5", published{0.50, 0.625, 1, 0.05, 2.50}, 25_001)
+	// Haiku 4.5 must not have picked anything up from the new row.
+	assertPublished(t, "claude-haiku-4-5", published{1, 1.25, 2, 0.10, 5}, 1_000_000)
+}
+
+// The vendor's own worked example, with the session-runtime line left out
+// because this proxy does not bill it: Opus 5.5, 10,000 fresh input, 40,000
+// cache reads at 4 x 0.05, 15,000 output = $0.04 + $0.008 + $0.30.
+func TestSeedTableReproducesTheVendorWorkedExample(t *testing.T) {
+	b := Compute(Rates, "claude-opus-5-5", Usage{In: 10_000, Read: 40_000, Out: 15_000}, time.Now())
+	if !b.Priced {
+		t.Fatal("claude-opus-5-5 is unpriced")
+	}
+	closeTo(t, b.Read, 0.008, "Read")
+	closeTo(t, b.Total, 0.348, "Total")
+}
+
+// A read multiplier that departs from 0.1x has to reach every number derived
+// from it, not just Compute: the cut list prices a dead schema at the read rate,
+// and a cache break's rebill is everything above what a hit would have cost.
+func TestReadMultiplierReachesEveryDerivedNumber(t *testing.T) {
+	closeTo(t, ReadPerTok(Rates, "claude-opus-5-5", time.Now())*1e6, 0.20, "ReadPerTok opus-5-5")
+	closeTo(t, ReadPerTok(Rates, "claude-opus-5", time.Now())*1e6, 0.50, "ReadPerTok opus-5")
+
+	w, f := RebillShares(Rates, "claude-opus-5-5", time.Now())
+	closeTo(t, w, 1-0.05/1.25, "rebill write share opus-5-5")
+	closeTo(t, f, 0.95, "rebill fresh share opus-5-5")
+
+	w, f = RebillShares(Rates, "some-new-model", time.Now())
+	closeTo(t, w, 1-0.1/1.25, "rebill write share, unpriced")
+	closeTo(t, f, 0.9, "rebill fresh share, unpriced")
+}
+
+func TestContextWindowHaiku55IsOneMillion(t *testing.T) {
+	if got := ContextWindow("claude-haiku-5-5"); got != 1_000_000 {
+		t.Errorf("ContextWindow(claude-haiku-5-5) = %d, want 1000000", got)
+	}
+}
+
+// assertPublished bills n tokens of each category and checks each line against
+// the published per-1M price.
+func assertPublished(t *testing.T, model string, p published, n int64) {
+	t.Helper()
+	b := Compute(Rates, model, Usage{In: n, Read: n, Write5m: n, Write1h: n, Out: n}, time.Now())
+	if !b.Priced {
+		t.Fatalf("%q is unpriced", model)
+	}
+	m := float64(n) / 1e6
+	closeTo(t, b.In, p.in*m, model+" In")
+	closeTo(t, b.Read, p.read*m, model+" Read")
+	closeTo(t, b.Write, (p.w5m+p.w1h)*m, model+" Write")
+	closeTo(t, b.Out, p.out*m, model+" Out")
+}

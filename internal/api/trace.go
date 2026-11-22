@@ -22,7 +22,7 @@ import (
 
 // What a request's cache did.
 const (
-	evHit   = "hit"   // the prefix matched — read at ReadMult
+	evHit   = "hit"   // the prefix matched — read at the model's read multiplier
 	evPrime = "prime" // first write on this session; there was nothing to hit yet
 	evBreak = "break" // primed, and then re-written
 	evFresh = "fresh" // billed fresh with no cache in play at all
@@ -467,6 +467,7 @@ func foldTrace(sid string, rows []store.Row, ts toolset, results []wire.ResultIt
 	t.Stateless = t.Req-t.Err >= statelessMinReqs && t.Tok.Read == 0
 	stateless := t.Stateless
 	primed := false
+	rebillWrite, rebillFresh := billing.RebillShares(rates, t.Model, last)
 	for i, r := range rows {
 		e := cacheEvent{ID: r.ID, BadIdx: -1}
 		if i > 0 {
@@ -513,9 +514,9 @@ func foldTrace(sid string, rows []store.Row, ts toolset, results []wire.ResultIt
 					e.Cause = causeSystem
 				}
 			}
-			e.Rebill = v.Cost.Write * billing.RebillWriteShare
+			e.Rebill = v.Cost.Write * rebillWrite
 		case evFresh:
-			e.Rebill = v.Cost.In * billing.RebillFreshShare
+			e.Rebill = v.Cost.In * rebillFresh
 		}
 		if e.Rebill > 0 {
 			t.BreakCost += e.Rebill

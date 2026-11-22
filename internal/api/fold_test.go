@@ -688,3 +688,40 @@ func TestFoldColdStartRefusesToClaimATrend(t *testing.T) {
 		t.Error("ColdStart should be false once we have more than a window of history")
 	}
 }
+
+// The cache-read label on a request has to name the multiplier its cost was
+// billed at. The page printed a hard-coded "0.1×" beside every read, which was
+// a price nobody charged on Opus 5.5 (0.05×) or Fable 5.2 (0.025×). The number
+// now travels with the row, from the same rate that produced the cost — and an
+// unpriced row carries none, because nothing was billed at any multiplier.
+func TestRowViewCarriesTheReadMultiplierItBilledAt(t *testing.T) {
+	rates := []billing.Rate{
+		{Key: "cheap-reads", InPerM: 4, OutPerM: 20, CacheReadMult: 0.05},
+		{Key: "test-model", InPerM: 3, OutPerM: 15},
+	}
+	for _, c := range []struct {
+		model    string
+		want     float64
+		wantRead float64 // USD for 1M cache reads
+	}{
+		{"cheap-reads", 0.05, 4 * 0.05},
+		{"test-model", 0.1, 3 * 0.1},
+		{"nobody-priced-this", 0, 0},
+	} {
+		t.Run(c.model, func(t *testing.T) {
+			v := rowView(row(1, 0, c.model, 100, 1_000_000, 0, 0, 10), rates)
+			if v.ReadMult != c.want {
+				t.Errorf("ReadMult = %v, want %v", v.ReadMult, c.want)
+			}
+			if math.Abs(v.Cost.Read-c.wantRead) > 1e-9 {
+				t.Errorf("Cost.Read = %v, want %v — the label and the cost must come from one rate", v.Cost.Read, c.wantRead)
+			}
+			blob, _ := json.Marshal(v)
+			var m map[string]any
+			_ = json.Unmarshal(blob, &m)
+			if _, present := m["readMult"]; present != (c.want > 0) {
+				t.Errorf("readMult present = %v in %s", present, blob)
+			}
+		})
+	}
+}

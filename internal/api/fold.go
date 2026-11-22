@@ -125,16 +125,25 @@ type recentRow struct {
 	// routes existed, and the page draws nothing rather than guessing.
 	Upstream string `json:"upstream,omitempty"`
 
-	Sid     string    `json:"sid"`
-	Op      string    `json:"op"`
-	Status  int       `json:"status"`
-	Ms      int64     `json:"ms"`
-	Ttft    int64     `json:"ttft"`
-	Stop    string    `json:"stop"`
-	Aborted bool      `json:"aborted"`
-	Tok     tokens    `json:"tok"`
-	Cost    costs     `json:"cost"`
-	Priced  bool      `json:"priced"`
+	Sid     string `json:"sid"`
+	Op      string `json:"op"`
+	Status  int    `json:"status"`
+	Ms      int64  `json:"ms"`
+	Ttft    int64  `json:"ttft"`
+	Stop    string `json:"stop"`
+	Aborted bool   `json:"aborted"`
+	Tok     tokens `json:"tok"`
+	Cost    costs  `json:"cost"`
+	Priced  bool   `json:"priced"`
+
+	// ReadMult is what this request's cache reads billed at as a share of its
+	// input rate: 0.1 on most models, 0.05 or 0.025 on the ones that read
+	// cheaper. It is the label next to the cache-read cost, and it has to come
+	// from the rate that produced that cost — a page that printed "0.1×" beside
+	// an Opus 5.5 read was describing a price nobody charged. Absent when the
+	// request is unpriced, because then nothing was billed at any multiplier.
+	ReadMult float64 `json:"readMult,omitempty"`
+
 	Shape   shape     `json:"shape"`
 	Bytes   byteSplit `json:"bytes"`
 	ErrType string    `json:"errType,omitempty"`
@@ -349,6 +358,10 @@ func rowView(r store.Row, rates []billing.Rate) recentRow {
 	}
 	model := billedModel(r.ModelReq, r.ModelServed)
 	bill := billing.Compute(rates, model, u, at)
+	readMult := 0.0
+	if m, ok := billing.ReadMultFor(rates, model, at); ok {
+		readMult = m
+	}
 
 	return recentRow{
 		ID:       r.ID,
@@ -366,6 +379,7 @@ func rowView(r store.Row, rates []billing.Rate) recentRow {
 		Tok:      tokens{In: u.In, Read: u.Read, Write: u.Write5m + u.Write1h, Out: u.Out},
 		Cost:     costs{In: bill.In, Read: bill.Read, Write: bill.Write, Out: bill.Out},
 		Priced:   bill.Priced,
+		ReadMult: readMult,
 		Shape:    shape{Think: r.ThinkTokens, Text: r.TextTokens, Tool: r.ToolTokens},
 		Bytes: byteSplit{
 			Total:    r.TotalBytes,

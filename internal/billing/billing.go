@@ -12,8 +12,12 @@ import (
 )
 
 // Cache multipliers ride on the input base rate. Anthropic and OpenAI both bill
-// reads at 0.1x and writes at 1.25x; Anthropic's 1-hour writes bill at 2.0x.
-// These hold for every model currently represented in Rates.
+// writes at 1.25x and Anthropic's 1-hour writes at 2.0x, on every model in Rates.
+//
+// Reads are 0.1x on most models, and ReadMult is that default — but not on all
+// of them: Opus 5.5 and Sonnet 5.5 read at 0.05x, and Fable/Mythos 5.1 and 5.2
+// at 0.025x. A row whose model reads at a different multiplier says so in
+// Rate.CacheReadMult. Never bill a read off this constant directly; ask the rate.
 const (
 	ReadMult    = 0.1
 	Write5mMult = 1.25
@@ -37,15 +41,34 @@ func CacheTTLFor(model string) time.Duration {
 	return CacheTTL
 }
 
-// What a cache break actually costs, as a share of the bill it produced.
+// RebillShares is what a cache break actually costs, as a share of the bill it
+// produced: write is a re-written prefix against one that hit, fresh is input
+// billed fresh against the same tokens read from cache.
 //
-// Not fudge factors: a prefix that had hit would have billed at ReadMult, so the
-// *extra* a break costs is everything above that. Both fall out of the
-// multipliers above, which is why neither is written as a decimal.
-const (
-	RebillWriteShare = 1 - ReadMult/Write5mMult // a re-written prefix vs. one that hit
-	RebillFreshShare = 1 - ReadMult             // input billed fresh vs. read from cache
-)
+// Not fudge factors: a prefix that had hit would have billed at the model's read
+// multiplier, so the *extra* a break costs is everything above that. Both fall
+// out of the multipliers, which is why neither is written as a decimal — and why
+// they are per model: a miss on Opus 5.5 (reads at 0.05x) wastes a larger share
+// of the write than a miss on a 0.1x model does.
+//
+// An unpriced model gets the default multiplier. Its costs are zero, so the
+// shares only ever multiply zero; they are not a guess at its price.
+func RebillShares(rates []Rate, model string, at time.Time) (write, fresh float64) {
+	m, _ := ReadMultFor(rates, model, at)
+	return 1 - m/Write5mMult, 1 - m
+}
+
+// ReadMultFor is the multiplier a cache read of this model bills at, as a share
+// of its input rate — the number the page prints next to a request's cache-read
+// lane. ok is false when the model has no rate; m is then the default, which
+// labels nothing, because an unpriced request has no billed multiplier to show.
+func ReadMultFor(rates []Rate, model string, at time.Time) (m float64, ok bool) {
+	r, ok := match(rates, normalize(model), at)
+	if !ok {
+		return ReadMult, false
+	}
+	return r.readMult(), true
+}
 
 // ContextWindow is how many tokens the model will hold — the denominator of the
 // trace's "% of window" gauge, and the number "compact now" is advice on the
@@ -90,6 +113,7 @@ func ContextWindow(model string) int64 {
 // "sonnet" family match: an older 200k sibling would inherit 1M and the gauge
 // would under-read instead, which is the same lie pointing the other way.
 var millionTokenModels = []string{
+	"claude-haiku-5-5",
 	"claude-opus-4-6",
 	"claude-opus-4-7",
 	"claude-opus-4-8",
@@ -110,7 +134,7 @@ func ReadPerTok(rates []Rate, model string, at time.Time) float64 {
 	if !ok {
 		return 0
 	}
-	return r.InPerM / 1e6 * ReadMult
+	return r.InPerM / 1e6 * r.readMult()
 }
 
 // EstTokens is bytes → tokens, the standard 4:1 approximation. Used only where
@@ -141,6 +165,17 @@ type Rate struct {
 	// InPerM and OutPerM are USD per 1M tokens on the standard tier.
 	InPerM  float64
 	OutPerM float64
+
+	// CacheReadMult is what a cache read costs as a share of the input rate, for
+	// a model that departs from the 0.1x default. Zero means the default: almost
+	// every row is 0.1x, and a zero that billed reads as free would be the one
+	// silent wrong number this package exists to avoid. It applies to whichever
+	// input rate the request lands on, the long-context one included.
+	//
+	// Set only by hand, from a vendor page. internal/rates never maps it: a
+	// published row whose read discount disagrees with the default is dropped,
+	// not imported, so a fetched rate always bills reads at ReadMult.
+	CacheReadMult float64
 
 	// From and Until bound the window in which this rate applied, [From, Until):
 	// From is inclusive, Until is exclusive. A zero From is valid from the past;
@@ -199,12 +234,20 @@ func Compute(rates []Rate, model string, u Usage, at time.Time) Bill {
 	b := Bill{
 		Priced: true,
 		In:     cost(u.In, in),
-		Read:   cost(u.Read, in*ReadMult),
+		Read:   cost(u.Read, in*r.readMult()),
 		Write:  cost(u.Write5m, in*Write5mMult) + cost(u.Write1h, in*Write1hMult),
 		Out:    cost(u.Out, out),
 	}
 	b.Total = b.In + b.Read + b.Write + b.Out
 	return b
+}
+
+// readMult is the rate's cache-read multiplier, with zero meaning the default.
+func (r Rate) readMult() float64 {
+	if r.CacheReadMult > 0 {
+		return r.CacheReadMult
+	}
+	return ReadMult
 }
 
 // match returns the first rate whose key is a substring of model and whose
@@ -235,7 +278,7 @@ func match(rates []Rate, model string, at time.Time) (Rate, bool) {
 // response never named the model it actually served.
 func (r Rate) matches(model string) bool {
 	if !r.Exact {
-		return strings.Contains(model, r.Key)
+		return containsKey(model, r.Key)
 	}
 	if model == r.Key {
 		return true
@@ -244,6 +287,30 @@ func (r Rate) matches(model string) bool {
 		return model[i+1:] == r.Key
 	}
 	return false
+}
+
+// containsKey is the substring rule, with one boundary: the key may not end in
+// the middle of a number.
+//
+// normalize writes Vertex's '@' as '-', so a dated snapshot arrives as
+// "claude-fable-5-20260601" — and a bare substring test finds "claude-fable-5-2"
+// inside it, pricing Fable 5 at Fable 5.2's rate. Every version key ends in a
+// digit and every snapshot date begins with one, so the rule is exactly "the
+// character after the match is not a digit". Nothing else about substring
+// matching changes: a route prefix in front, or a date, suffix or "[1m]" after
+// a separator, still rides along.
+func containsKey(model, key string) bool {
+	for from := 0; ; {
+		i := strings.Index(model[from:], key)
+		if i < 0 {
+			return false
+		}
+		end := from + i + len(key)
+		if end == len(model) || model[end] < '0' || model[end] > '9' {
+			return true
+		}
+		from += i + 1
+	}
 }
 
 // normalize rewrites a wire model name into the spelling the rate keys use, so
